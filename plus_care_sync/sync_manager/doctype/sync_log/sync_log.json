@@ -1,0 +1,113 @@
+{
+ "actions": [],
+ "autoname": "field:sync_id",
+ "creation": "2024-02-08 19:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "sync_id",
+  "sync_type",
+  "doctype_name",
+  "document_name",
+  "column_break_1",
+  "status",
+  "records_synced",
+  "sync_time",
+  "details_section",
+  "error_message",
+  "sync_details"
+ ],
+ "fields": [
+  {
+   "fieldname": "sync_id",
+   "fieldtype": "Data",
+   "label": "Sync ID",
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "sync_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Sync Type",
+   "options": "Fetched\nManual\nAutomatic\nScheduled\nPublished\nError"
+  },
+  {
+   "fieldname": "doctype_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "DocType Name"
+  },
+  {
+   "fieldname": "document_name",
+   "fieldtype": "Data",
+   "label": "Document Name"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Queued\nSuccess\nFailed\nPending\nIn Progress\nPublished\nRejected"
+  },
+  {
+   "fieldname": "records_synced",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Records Synced"
+  },
+  {
+   "default": "Now",
+   "fieldname": "sync_time",
+   "fieldtype": "Datetime",
+   "label": "Sync Time"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "details_section",
+   "fieldtype": "Section Break",
+   "label": "Details"
+  },
+  {
+   "fieldname": "error_message",
+   "fieldtype": "Text",
+   "label": "Error Message"
+  },
+  {
+   "fieldname": "sync_details",
+   "fieldtype": "Long Text",
+   "label": "Sync Details"
+  }
+ ],
+ "links": [],
+ "modified": "2024-02-08 19:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Sync Manager",
+ "name": "Sync Log",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

@@ -1,0 +1,205 @@
+{
+ "actions": [
+  {
+   "action": "plus_care_sync.sync_manager.doctype.sync_queue.sync_queue.bulk_approve",
+   "action_type": "Server Action",
+   "label": "Approve Selected"
+  },
+  {
+   "action": "plus_care_sync.sync_manager.doctype.sync_queue.sync_queue.bulk_reject",
+   "action_type": "Server Action",
+   "label": "Reject Selected"
+  },
+  {
+   "action": "plus_care_sync.sync_manager.doctype.sync_queue.sync_queue.bulk_publish",
+   "action_type": "Server Action",
+   "label": "Publish Selected"
+  }
+ ],
+ "autoname": "format:SQ-{#####}",
+ "creation": "2024-02-08 20:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "reference_section",
+  "reference_doctype",
+  "reference_name",
+  "remote_name",
+  "column_break_1",
+  "status",
+  "sync_direction",
+  "queued_at",
+  "data_section",
+  "data_preview",
+  "full_data",
+  "conflict_section",
+  "has_conflict",
+  "local_modified",
+  "remote_modified",
+  "conflict_resolution",
+  "actions_section",
+  "reviewed_by",
+  "reviewed_at",
+  "rejection_reason"
+ ],
+ "fields": [
+  {
+   "fieldname": "reference_section",
+   "fieldtype": "Section Break",
+   "label": "Reference"
+  },
+  {
+   "fieldname": "reference_doctype",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "DocType",
+   "options": "DocType",
+   "reqd": 1
+  },
+  {
+   "fieldname": "reference_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Document Name"
+  },
+  {
+   "fieldname": "remote_name",
+   "fieldtype": "Data",
+   "label": "Remote Document Name",
+   "description": "Name on remote server (if different)"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Pending",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Pending\nApproved\nRejected\nPublished\nFailed"
+  },
+  {
+   "fieldname": "sync_direction",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Direction",
+   "options": "Incoming (Live → Local)\nOutgoing (Local → Live)"
+  },
+  {
+   "default": "Now",
+   "fieldname": "queued_at",
+   "fieldtype": "Datetime",
+   "label": "Queued At"
+  },
+  {
+   "fieldname": "data_section",
+   "fieldtype": "Section Break",
+   "label": "Data Preview"
+  },
+  {
+   "fieldname": "data_preview",
+   "fieldtype": "Code",
+   "label": "Data Preview",
+   "options": "JSON",
+   "read_only": 1,
+   "description": "Preview of key fields"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "full_data",
+   "fieldtype": "Code",
+   "label": "Full Data (JSON)",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "depends_on": "eval:doc.has_conflict",
+   "fieldname": "conflict_section",
+   "fieldtype": "Section Break",
+   "label": "Conflict Information"
+  },
+  {
+   "default": "0",
+   "fieldname": "has_conflict",
+   "fieldtype": "Check",
+   "label": "Has Conflict"
+  },
+  {
+   "depends_on": "eval:doc.has_conflict",
+   "fieldname": "local_modified",
+   "fieldtype": "Datetime",
+   "label": "Local Modified",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.has_conflict",
+   "fieldname": "remote_modified",
+   "fieldtype": "Datetime",
+   "label": "Remote Modified",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.has_conflict",
+   "fieldname": "conflict_resolution",
+   "fieldtype": "Select",
+   "label": "Resolution",
+   "options": "\nUse Remote Data\nUse Local Data\nMerge Manually"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "actions_section",
+   "fieldtype": "Section Break",
+   "label": "Review Information"
+  },
+  {
+   "fieldname": "reviewed_by",
+   "fieldtype": "Link",
+   "label": "Reviewed By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reviewed_at",
+   "fieldtype": "Datetime",
+   "label": "Reviewed At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "rejection_reason",
+   "fieldtype": "Small Text",
+   "label": "Rejection Reason",
+   "depends_on": "eval:doc.status=='Rejected'"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2024-02-08 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Sync Manager",
+ "name": "Sync Queue",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}
