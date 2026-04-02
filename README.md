@@ -1,113 +1,74 @@
 # Plus Care Sync
 
-Offline sync solution for ERPNext - sync data between local and live servers.
+A Frappe/ERPNext application for syncing data between a local ERPNext server and a live server. Built for pharmacy branches that operate offline or with limited connectivity and need to stay in sync with a central server.
 
 ## Features
 
-- **Bidirectional Sync** - Sync data from local to live, live to local, or both ways
-- **Selective Sync** - Choose specific modules or DocTypes to sync
-- **Conflict Resolution** - Multiple strategies to handle data conflicts
-- **Automatic or Manual** - Schedule automatic syncs or trigger manually
-- **Comprehensive Logging** - Track all sync operations and errors
-- **Offline Support** - Queue changes when offline, sync when online
+- **Bidirectional Sync** — push from local to live, pull from live to local, or both
+- **Selective Sync** — choose specific modules or DocTypes to sync rather than the full database
+- **Conflict Resolution** — configurable strategies: live wins, local wins, latest timestamp wins, or manual review
+- **Scheduled or Manual** — run sync on a schedule or trigger it manually from the settings page
+- **Sync Logs** — full history of every sync operation with error details
+
+## Requirements
+
+- ERPNext v15
+- Frappe v15
+- Network access between local and live servers (for manual/scheduled sync)
 
 ## Installation
 
 ```bash
-cd /workspace/erpnext-dev/frappe-bench
-bench --site erpnext.localhost install-app plus_care_sync
-bench --site erpnext.localhost migrate
-bench --site erpnext.localhost clear-cache
+cd /path/to/your/bench
+bench get-app https://github.com/your-org/plus_care_sync --branch main
+bench --site yoursite.localhost install-app plus_care_sync
+bench --site yoursite.localhost migrate
 ```
 
-## Quick Start
+## Setup
 
-1. Navigate to: **Setup → Sync Settings**
-2. Enable sync
-3. Configure sync direction and data scope
-4. Enter remote server credentials
-5. Test connection
-6. Click "Sync Now"
+### On the live server
 
-## Configuration Guide
+1. Go to **User Settings → API Access**
+2. Generate an API Key and API Secret for a System Manager user
+3. Copy both values
 
-### Sync Direction Options
+### On the local server
 
-- **Local to Live (One Way)** - Local is source of truth
-- **Live to Local (One Way)** - Live server is source
-- **Bidirectional (Two Way)** - Both can create/edit data
+1. Go to **Setup → Sync Settings**
+2. Enter the live server URL
+3. Paste the API Key and Secret
+4. Choose sync direction and data scope
+5. Click **Test Connection** to verify
+6. Click **Sync Now** to run the first sync
 
-### Data Scope Options
+## Sync Options
 
-**Selective Modules** (Recommended):
-- Sales, Purchase, Stock
-- Accounting, Customers, Items
-- HR & Payroll
-- Custom DocTypes
+| Option | Description |
+|---|---|
+| Local to Live | Local branch data is pushed to the central server |
+| Live to Local | Central server data is pulled down to the branch |
+| Bidirectional | Both directions, with conflict resolution applied |
 
-**Full Database** - Sync everything (use with caution)
+**Conflict Resolution**
 
-### Conflict Resolution
-
-- **Live Server Wins** - Remote data takes priority
-- **Local Server Wins** - Local data takes priority
-- **Latest Timestamp Wins** - Most recent modification wins
-- **Manual Review** - Log conflicts for manual resolution
-
-## Remote Server Setup
-
-1. On live server, create API keys:
-   - Go to User → API Access
-   - Generate Keys
-   - Copy API Key and Secret
-
-2. On local server, enter in Sync Settings:
-   - Remote URL: `https://yourcompany.erpnext.com`
-   - API Key: (from step 1)
-   - API Secret: (from step 1)
-
-## Usage
-
-### Manual Sync
-Click "Sync Now" button in Sync Settings
-
-### Automatic Sync
-1. Set Sync Mode to "Automatic"
-2. Choose frequency (5 min to Daily)
-3. Save settings
-
-### View Logs
-Click "View Sync Logs" to see sync history and errors
+| Strategy | Behavior |
+|---|---|
+| Live Server Wins | Remote data always overwrites local |
+| Local Server Wins | Local data always overwrites remote |
+| Latest Timestamp Wins | Most recently modified record is kept |
+| Manual Review | Conflicts are logged for a human to resolve |
 
 ## Troubleshooting
 
-**Connection Failed**
-- Verify remote URL is accessible
-- Check API credentials are correct
-- Ensure System Manager role on remote
+**Connection failed** — Verify the live server URL is reachable, and that the API credentials belong to a System Manager user.
 
-**Sync Errors**
-- Check Sync Logs for details
-- Verify DocTypes exist on both servers
-- Check network connectivity
+**Sync errors** — Open **Sync Logs** to see which records failed and why. Common causes are missing DocTypes on one server or permission issues.
 
-## Best Practices
-
-1. Test with one module before full sync
-2. Backup both servers before initial sync
-3. Use selective modules for better performance
-4. Schedule heavy syncs during off-hours
-5. Monitor logs regularly
-
-## Contributing
-
-This app uses `pre-commit` for code formatting:
-
-```bash
-cd apps/plus_care_sync
-pre-commit install
-```
+**Data mismatch after sync** — Run a selective sync on the affected module rather than a full sync, then check the logs.
 
 ## License
 
-MIT
+MIT — see [license.txt](license.txt)
+
+Copyright (c) 2026 Plus Care Pharmacy — Yemen
