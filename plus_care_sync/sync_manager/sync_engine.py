@@ -425,31 +425,52 @@ def execute_sync():
 		for doctype in doctypes:
 			try:
 				# Sync based on direction
+				sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
+
 				if settings.sync_direction == "Local to Live (One Way)":
-					count = engine.sync_doctype(doctype)
-					total_synced += count
+					pushed = engine.sync_doctype(doctype)
+					total_synced += pushed
+					frappe.get_doc({
+						"doctype": "Sync Log",
+						"sync_type": sync_type,
+						"doctype_name": doctype,
+						"status": "Success",
+						"records_synced": pushed
+					}).insert(ignore_permissions=True)
 
 				elif settings.sync_direction == "Live to Local (One Way)":
-					count = engine.pull_from_remote(doctype)
-					total_synced += count
+					pulled = engine.pull_from_remote(doctype)
+					total_synced += pulled
+					frappe.get_doc({
+						"doctype": "Sync Log",
+						"sync_type": sync_type,
+						"doctype_name": doctype,
+						"status": "Success",
+						"records_synced": pulled
+					}).insert(ignore_permissions=True)
 
 				elif settings.sync_direction == "Bidirectional (Two Way)":
-					# Push local changes
-					count = engine.sync_doctype(doctype)
-					total_synced += count
+					pushed = engine.sync_doctype(doctype)
+					total_synced += pushed
+					frappe.get_doc({
+						"doctype": "Sync Log",
+						"sync_type": sync_type,
+						"doctype_name": doctype,
+						"status": "Success",
+						"records_synced": pushed,
+						"sync_details": "Direction: Local → Live"
+					}).insert(ignore_permissions=True)
 
-					# Pull remote changes
-					count = engine.pull_from_remote(doctype)
-					total_synced += count
-
-				# Log success
-				frappe.get_doc({
-					"doctype": "Sync Log",
-					"sync_type": "Manual" if settings.sync_mode == "Manual" else "Automatic",
-					"doctype_name": doctype,
-					"status": "Success",
-					"records_synced": count
-				}).insert(ignore_permissions=True)
+					pulled = engine.pull_from_remote(doctype)
+					total_synced += pulled
+					frappe.get_doc({
+						"doctype": "Sync Log",
+						"sync_type": sync_type,
+						"doctype_name": doctype,
+						"status": "Success",
+						"records_synced": pulled,
+						"sync_details": "Direction: Live → Local"
+					}).insert(ignore_permissions=True)
 
 			except Exception as e:
 				engine.log_sync_error(doctype, None, str(e))
