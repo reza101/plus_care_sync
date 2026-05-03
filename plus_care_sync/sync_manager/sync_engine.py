@@ -186,6 +186,7 @@ class SyncEngine:
 			pushed = self._pushed_this_session.get(doctype, set())
 
 			synced_count = 0
+			needs_tree_rebuild = None  # (doctype, parent_field) if any tree records were written
 			for record in records:
 				if record.get("name") in pushed:
 					continue  # We just pushed this — don't pull it back
@@ -193,10 +194,18 @@ class SyncEngine:
 					if self.use_queue:
 						self.add_to_queue(doctype, record, "Incoming (Live → Local)")
 					else:
-						self.update_local_record(doctype, record)
+						tree_info = self.update_local_record(doctype, record, skip_rebuild=True)
+						if tree_info:
+							needs_tree_rebuild = tree_info
 					synced_count += 1
 				except Exception as e:
 					self.log_sync_error(doctype, record.get("name"), str(e))
+
+			# Rebuild tree once after all records are written, not once per record
+			if needs_tree_rebuild:
+				from frappe.utils.nestedset import rebuild_tree
+				rebuild_tree(needs_tree_rebuild[0], needs_tree_rebuild[1])
+				frappe.db.commit()
 
 			return synced_count
 
@@ -292,10 +301,12 @@ class SyncEngine:
 		except:
 			pass
 
-	def update_local_record(self, doctype, remote_data):
-		"""Update local record with remote data"""
-		from frappe.utils.nestedset import rebuild_tree
+	def update_local_record(self, doctype, remote_data, skip_rebuild=False):
+		"""Update local record with remote data.
 
+		Returns (doctype, parent_field) when skip_rebuild=True and a tree record was
+		written, so the caller can issue a single rebuild_tree after the batch.
+		"""
 		try:
 			remote_data = dict(remote_data)
 
@@ -343,6 +354,10 @@ class SyncEngine:
 						doc.flags.ignore_validate = True
 						doc.insert()
 
+					if skip_rebuild:
+						return (doctype, parent_field)
+
+					from frappe.utils.nestedset import rebuild_tree
 					rebuild_tree(doctype, parent_field)
 					frappe.db.commit()
 
