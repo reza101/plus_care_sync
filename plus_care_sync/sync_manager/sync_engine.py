@@ -156,10 +156,6 @@ class SyncEngine:
 				"order_by": "modified desc"
 			}
 
-			# Only fetch records modified since last sync
-			if self.settings.last_sync_time:
-				params["filters"] = f'[["modified", ">", "{self.settings.last_sync_time}"]]'
-
 			response = requests.get(
 				endpoint,
 				params=params,
