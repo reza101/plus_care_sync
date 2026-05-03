@@ -63,7 +63,10 @@ class SyncQueue(Document):
 			frappe.throw(_("Only approved items can be published"))
 
 		try:
-			data = json.loads(self.full_data)
+			try:
+				data = json.loads(self.full_data)
+			except (json.JSONDecodeError, TypeError) as json_err:
+				frappe.throw(_("Cannot publish: stored data is corrupted (JSON error: {0})").format(str(json_err)))
 
 			if self.sync_direction == "Incoming (Live → Local)":
 				# Create or update local record from remote data
@@ -260,6 +263,7 @@ def bulk_approve(names=None, doc=None):
 		names = json.loads(names)
 
 	approved = 0
+	failed = 0
 	for name in names:
 		try:
 			doc = frappe.get_doc("Sync Queue", name)
@@ -267,10 +271,15 @@ def bulk_approve(names=None, doc=None):
 				doc.approve()
 				approved += 1
 		except Exception:
-			pass
+			failed += 1
+			frappe.log_error(frappe.get_traceback(), f"Plus Care Sync - bulk_approve failed for {name}")
 
-	frappe.msgprint(_("{0} items approved").format(approved), indicator="green", alert=True)
-	return {"approved": approved}
+	frappe.msgprint(
+		_("{0} items approved{1}").format(approved, f", {failed} failed" if failed else ""),
+		indicator="green" if not failed else "orange",
+		alert=True
+	)
+	return {"approved": approved, "failed": failed}
 
 
 @frappe.whitelist()
@@ -324,6 +333,7 @@ def bulk_reject(names=None, reason=None, doc=None):
 		names = json.loads(names)
 
 	rejected = 0
+	failed = 0
 	for name in names:
 		try:
 			doc = frappe.get_doc("Sync Queue", name)
@@ -336,11 +346,16 @@ def bulk_reject(names=None, reason=None, doc=None):
 				doc.save(ignore_permissions=True)
 				rejected += 1
 		except Exception:
-			pass
+			failed += 1
+			frappe.log_error(frappe.get_traceback(), f"Plus Care Sync - bulk_reject failed for {name}")
 
 	frappe.db.commit()
-	frappe.msgprint(_("{0} items rejected").format(rejected), indicator="orange", alert=True)
-	return {"rejected": rejected}
+	frappe.msgprint(
+		_("{0} items rejected{1}").format(rejected, f", {failed} failed" if failed else ""),
+		indicator="orange" if not failed else "red",
+		alert=True
+	)
+	return {"rejected": rejected, "failed": failed}
 
 
 @frappe.whitelist()
@@ -359,6 +374,7 @@ def bulk_retry(names=None, doc=None):
 		names = json.loads(names)
 
 	retried = 0
+	failed = 0
 	for name in names:
 		try:
 			doc = frappe.get_doc("Sync Queue", name)
@@ -369,11 +385,16 @@ def bulk_retry(names=None, doc=None):
 				doc.save(ignore_permissions=True)
 				retried += 1
 		except Exception:
-			pass
+			failed += 1
+			frappe.log_error(frappe.get_traceback(), f"Plus Care Sync - bulk_retry failed for {name}")
 
 	frappe.db.commit()
-	frappe.msgprint(_("{0} items reset to Pending").format(retried), indicator="blue", alert=True)
-	return {"retried": retried}
+	frappe.msgprint(
+		_("{0} items reset to Pending{1}").format(retried, f", {failed} failed" if failed else ""),
+		indicator="blue" if not failed else "orange",
+		alert=True
+	)
+	return {"retried": retried, "failed": failed}
 
 
 @frappe.whitelist()

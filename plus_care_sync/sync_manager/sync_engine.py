@@ -9,6 +9,21 @@ from datetime import datetime
 from urllib.parse import quote
 
 
+def _parse_dt(value):
+	"""Coerce a datetime, date, or ISO string to a datetime object for safe comparison."""
+	if value is None:
+		return None
+	if isinstance(value, datetime):
+		return value
+	s = str(value)
+	for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+		try:
+			return datetime.strptime(s, fmt)
+		except ValueError:
+			continue
+	return None
+
+
 class SyncEngine:
 	"""Core sync engine for Plus Care Sync"""
 
@@ -225,8 +240,8 @@ class SyncEngine:
 				"sync_details": message
 			}).insert(ignore_permissions=True)
 			frappe.db.commit()
-		except:
-			pass
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "Plus Care Sync - log_sync_info failed")
 
 	def add_to_queue(self, doctype, data, direction):
 		"""Add record to Sync Queue for review"""
@@ -300,8 +315,8 @@ class SyncEngine:
 				"records_synced": 1,
 				"sync_details": f"Direction: {direction}\nAction: New item added to queue"
 			}).insert(ignore_permissions=True)
-		except:
-			pass
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "Plus Care Sync - log_fetch failed")
 
 	def _strip_unknown_fields(self, doctype, data):
 		"""Return a copy of data containing only fields that exist in the local doctype meta.
@@ -348,7 +363,9 @@ class SyncEngine:
 					if self.settings.conflict_resolution == "Latest Timestamp Wins":
 						local_modified = frappe.db.get_value(doctype, name, "modified")
 						remote_modified = remote_data.get("modified")
-						if remote_modified and str(remote_modified) <= str(local_modified):
+						r_dt = _parse_dt(remote_modified)
+						l_dt = _parse_dt(local_modified)
+						if r_dt and l_dt and r_dt <= l_dt:
 							should_update = False
 					elif self.settings.conflict_resolution == "Local Server Wins":
 						# FIX 3: explicit local-wins — skip update
@@ -362,6 +379,7 @@ class SyncEngine:
 							if k not in ("name", "doctype")}
 						if update_fields:
 							frappe.db.set_value(doctype, name, update_fields, update_modified=False)
+							frappe.db.commit()
 					else:
 						if not remote_data.get(parent_field):
 							existing_root = frappe.db.get_value(
@@ -376,6 +394,7 @@ class SyncEngine:
 						doc.flags.ignore_mandatory = True
 						doc.flags.ignore_validate = True
 						doc.insert()
+						frappe.db.commit()
 
 					if skip_rebuild:
 						return (doctype, parent_field)
@@ -393,7 +412,9 @@ class SyncEngine:
 						should_update = True
 					elif self.settings.conflict_resolution == "Latest Timestamp Wins":
 						remote_modified = remote_data.get("modified")
-						if remote_modified and remote_modified > str(local_doc.modified):
+						r_dt = _parse_dt(remote_modified)
+						l_dt = _parse_dt(local_doc.modified)
+						if r_dt and l_dt and r_dt > l_dt:
 							should_update = True
 					# FIX 3: "Local Server Wins" or unrecognized value — keep local, skip update
 					# (should_update stays False — explicit, not a silent accident)
@@ -423,8 +444,8 @@ class SyncEngine:
 				"error_message": error
 			}).insert(ignore_permissions=True)
 			frappe.db.commit()
-		except:
-			pass
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "Plus Care Sync - log_sync_error failed")
 
 
 @frappe.whitelist()

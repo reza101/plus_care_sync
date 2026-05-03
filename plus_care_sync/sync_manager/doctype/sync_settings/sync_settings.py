@@ -150,11 +150,21 @@ def auto_sync():
 			if (now - last).total_seconds() < interval:
 				return  # Not enough time has passed since last sync
 
-		from plus_care_sync.sync_manager.sync_engine import execute_sync
-		execute_sync()
+		# Distributed lock: prevents two scheduler workers that both passed the
+		# elapsed-time check from running concurrently. TTL = interval so the lock
+		# auto-expires even if the worker process dies mid-sync.
+		lock_key = "plus_care_sync_auto_running"
+		if frappe.cache().get_value(lock_key):
+			return  # Another instance is already running
+		frappe.cache().set_value(lock_key, True, expires_in_sec=interval)
 
-		# Record when this auto-sync ran so the next invocation can check elapsed time
-		frappe.db.set_value("Sync Settings", "Sync Settings", "last_sync_time", now, update_modified=False)
+		try:
+			from plus_care_sync.sync_manager.sync_engine import execute_sync
+			execute_sync()
+			# Record when this auto-sync ran so the next invocation can check elapsed time
+			frappe.db.set_value("Sync Settings", "Sync Settings", "last_sync_time", now, update_modified=False)
+		finally:
+			frappe.cache().delete_value(lock_key)
 
 	elif settings.sync_mode == "Scheduled" and settings.scheduled_time:
 		# Build today's scheduled datetime from the Time field value.
