@@ -123,8 +123,35 @@ class SyncSettings(Document):
 @frappe.whitelist()
 def auto_sync():
 	"""Automatic sync function called by scheduler"""
+	from datetime import datetime, timedelta  # noqa: F811 (shadows module-level import if any)
+
 	settings = frappe.get_single("Sync Settings")
 
-	if settings.enable_sync and settings.sync_mode == "Automatic":
+	if not settings.enable_sync:
+		return
+
+	if settings.sync_mode == "Automatic":
 		from plus_care_sync.sync_manager.sync_engine import execute_sync
 		execute_sync()
+
+	elif settings.sync_mode == "Scheduled" and settings.scheduled_time:
+		# Build today's scheduled datetime from the Time field value.
+		# Frappe returns Time fields as datetime.timedelta, not a string.
+		now = datetime.now()
+		t = settings.scheduled_time
+		if isinstance(t, timedelta):
+			total_secs = int(t.total_seconds())
+			h, rem = divmod(total_secs, 3600)
+			m, s = divmod(rem, 60)
+		else:
+			# Fallback: parse string value
+			parsed = datetime.strptime(str(t), "%H:%M:%S")
+			h, m, s = parsed.hour, parsed.minute, parsed.second
+
+		scheduled = now.replace(hour=h, minute=m, second=s, microsecond=0)
+
+		# Only fire if within 150 seconds of scheduled time (half the 5-min cron interval)
+		# to guarantee the sync runs at most once per scheduled slot.
+		if abs((now - scheduled).total_seconds()) <= 150:
+			from plus_care_sync.sync_manager.sync_engine import execute_sync
+			execute_sync()

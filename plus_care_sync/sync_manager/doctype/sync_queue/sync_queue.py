@@ -43,6 +43,20 @@ class SyncQueue(Document):
 		frappe.msgprint(_("Item rejected."), indicator="orange", alert=True)
 
 	@frappe.whitelist()
+	def retry(self):
+		"""Reset a failed item back to Pending so it can be re-approved and re-published"""
+		if self.status != "Failed":
+			frappe.throw(_("Only failed items can be retried"))
+
+		self.status = "Pending"
+		self.reviewed_by = None
+		self.reviewed_at = None
+		self.save(ignore_permissions=True)
+		frappe.db.commit()
+
+		frappe.msgprint(_("Item reset to Pending. Approve and publish again."), indicator="blue", alert=True)
+
+	@frappe.whitelist()
 	def publish(self):
 		"""Publish approved item - create/update the actual record"""
 		if self.status != "Approved":
@@ -91,30 +105,89 @@ class SyncQueue(Document):
 
 	def _create_or_update_local(self, data):
 		"""Create or update local record"""
+		from frappe.utils.nestedset import rebuild_tree
+
 		doctype = self.reference_doctype
 		name = self.reference_name or data.get("name")
 
-		# Remove fields that shouldn't be copied
-		fields_to_remove = ["docstatus", "idx", "owner", "creation", "modified", "modified_by"]
+		# Remove fields that must not be copied from live.
+		# lft/rgt/old_parent are nestedset positions local to each server.
+		fields_to_remove = [
+			"docstatus", "idx", "owner", "creation", "modified", "modified_by",
+			"lft", "rgt", "old_parent"
+		]
 		for field in fields_to_remove:
 			data.pop(field, None)
 
-		if frappe.db.exists(doctype, name):
-			# Update existing
-			doc = frappe.get_doc(doctype, name)
-			doc.update(data)
-			doc.flags.ignore_permissions = True
-			doc.save()
+		meta = frappe.get_meta(doctype)
+		is_tree = bool(meta.get("is_tree"))
+		parent_field = f"parent_{frappe.scrub(doctype)}" if is_tree else None
+
+		if is_tree and parent_field:
+			self._sync_tree_doctype(doctype, name, data, parent_field)
+			rebuild_tree(doctype, parent_field)
 		else:
-			# Create new
+			if frappe.db.exists(doctype, name):
+				doc = frappe.get_doc(doctype, name)
+				doc.update(data)
+				doc.flags.ignore_permissions = True
+				doc.save()
+			else:
+				data["doctype"] = doctype
+				if name:
+					data["name"] = name
+				doc = frappe.get_doc(data)
+				doc.flags.ignore_permissions = True
+				doc.insert()
+
+		frappe.db.commit()
+
+	def _sync_tree_doctype(self, doctype, name, data, parent_field):
+		"""
+		Sync a nestedset (tree) doctype record without triggering validate_loop errors.
+
+		The problem: NestedSet.on_update() → update_nsm() → update_move_node() calls
+		validate_loop() using the LOCAL lft/rgt values. When the local tree structure
+		differs from live, a valid parent appears to be a descendant, causing:
+		  - "Item cannot be added to its own descendants"  (on UPDATE via on_update hook)
+		  - "Multiple root nodes not allowed"              (on INSERT via before_insert hook)
+
+		ignore_validate=True only skips validate() — it does NOT skip on_update or
+		before_insert, so it cannot fix these errors.
+
+		Solution for UPDATE: write fields directly via frappe.db.set_value, bypassing
+		all ORM hooks, then call rebuild_tree to recalculate lft/rgt from scratch.
+
+		Solution for INSERT: ensure parent_field is populated (to pass the before_insert
+		root-node check), then insert normally with ignore_validate + ignore_mandatory.
+		After insert, update_nsm sees no parent change so update_move_node is not called.
+		"""
+		if frappe.db.exists(doctype, name):
+			# Direct DB write — bypasses on_update → NestedSet.on_update → update_nsm
+			# → update_move_node → validate_loop entirely.
+			update_fields = {k: v for k, v in data.items() if k not in ("name", "doctype")}
+			if update_fields:
+				frappe.db.set_value(doctype, name, update_fields, update_modified=False)
+		else:
+			# Ensure parent is set — NestedSet.before_insert() throws
+			# "Multiple root nodes not allowed" when parent_field is empty and a root exists.
+			if not data.get(parent_field):
+				existing_root = frappe.db.get_value(
+					doctype, {parent_field: ("in", ["", None])}, "name"
+				)
+				if existing_root and name != existing_root:
+					data[parent_field] = existing_root
+
 			data["doctype"] = doctype
 			if name:
 				data["name"] = name
 			doc = frappe.get_doc(data)
 			doc.flags.ignore_permissions = True
+			doc.flags.ignore_mandatory = True
+			doc.flags.ignore_validate = True
 			doc.insert()
-
-		frappe.db.commit()
+			# After insert: update_nsm sees get_db_value(parent) == get(parent)
+			# → no parent change → update_move_node is NOT called → no validate_loop error
 
 	def _push_to_remote(self, data):
 		"""Push record to remote server"""
@@ -172,8 +245,17 @@ def publish_item(name):
 
 
 @frappe.whitelist()
-def bulk_approve(names):
+def bulk_approve(names=None, doc=None):
 	"""Approve multiple items"""
+	# Guard: called from a single-doc form by mistake — approve the single doc
+	if names is None:
+		if doc:
+			doc_data = json.loads(doc) if isinstance(doc, str) else doc
+			doc_name = doc_data.get("name")
+			if doc_name:
+				return approve_item(doc_name)
+		frappe.throw(_("No items specified for bulk approve"))
+
 	if isinstance(names, str):
 		names = json.loads(names)
 
@@ -192,8 +274,17 @@ def bulk_approve(names):
 
 
 @frappe.whitelist()
-def bulk_publish(names):
+def bulk_publish(names=None, doc=None):
 	"""Publish multiple approved items"""
+	# Guard: called from a single-doc form by mistake — use publish_item instead
+	if names is None:
+		if doc:
+			doc_data = json.loads(doc) if isinstance(doc, str) else doc
+			doc_name = doc_data.get("name")
+			if doc_name:
+				return publish_item(doc_name)
+		frappe.throw(_("No items specified for bulk publish"))
+
 	if isinstance(names, str):
 		names = json.loads(names)
 
@@ -218,8 +309,17 @@ def bulk_publish(names):
 
 
 @frappe.whitelist()
-def bulk_reject(names, reason=None):
+def bulk_reject(names=None, reason=None, doc=None):
 	"""Reject multiple items"""
+	# Guard: called from a single-doc form by mistake — reject the single doc
+	if names is None:
+		if doc:
+			doc_data = json.loads(doc) if isinstance(doc, str) else doc
+			doc_name = doc_data.get("name")
+			if doc_name:
+				return reject_item(doc_name, reason)
+		frappe.throw(_("No items specified for bulk reject"))
+
 	if isinstance(names, str):
 		names = json.loads(names)
 
@@ -241,6 +341,39 @@ def bulk_reject(names, reason=None):
 	frappe.db.commit()
 	frappe.msgprint(_("{0} items rejected").format(rejected), indicator="orange", alert=True)
 	return {"rejected": rejected}
+
+
+@frappe.whitelist()
+def bulk_retry(names=None, doc=None):
+	"""Reset failed items back to Pending"""
+	if names is None:
+		if doc:
+			doc_data = json.loads(doc) if isinstance(doc, str) else doc
+			doc_name = doc_data.get("name")
+			if doc_name:
+				names = [doc_name]
+		if not names:
+			frappe.throw(_("No items specified for retry"))
+
+	if isinstance(names, str):
+		names = json.loads(names)
+
+	retried = 0
+	for name in names:
+		try:
+			doc = frappe.get_doc("Sync Queue", name)
+			if doc.status == "Failed":
+				doc.status = "Pending"
+				doc.reviewed_by = None
+				doc.reviewed_at = None
+				doc.save(ignore_permissions=True)
+				retried += 1
+		except Exception:
+			pass
+
+	frappe.db.commit()
+	frappe.msgprint(_("{0} items reset to Pending").format(retried), indicator="blue", alert=True)
+	return {"retried": retried}
 
 
 @frappe.whitelist()

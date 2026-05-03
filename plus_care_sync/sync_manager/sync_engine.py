@@ -295,30 +295,76 @@ class SyncEngine:
 
 	def update_local_record(self, doctype, remote_data):
 		"""Update local record with remote data"""
-		try:
-			if frappe.db.exists(doctype, remote_data.get("name")):
-				# Handle conflict based on strategy
-				local_doc = frappe.get_doc(doctype, remote_data.get("name"))
+		from frappe.utils.nestedset import rebuild_tree
 
-				if self.settings.conflict_resolution == "Live Server Wins":
-					# Remote data wins
-					local_doc.update(remote_data)
-					local_doc.save(ignore_permissions=True)
+		try:
+			remote_data = dict(remote_data)
+
+			for field in ("lft", "rgt", "old_parent"):
+				remote_data.pop(field, None)
+
+			meta = frappe.get_meta(doctype)
+			is_tree = bool(meta.get("is_tree"))
+			parent_field = f"parent_{frappe.scrub(doctype)}" if is_tree else None
+			name = remote_data.get("name")
+
+			if is_tree and parent_field:
+				# Determine if we should update based on conflict resolution
+				should_update = True
+				if frappe.db.exists(doctype, name):
+					if self.settings.conflict_resolution == "Latest Timestamp Wins":
+						local_modified = frappe.db.get_value(doctype, name, "modified")
+						remote_modified = remote_data.get("modified")
+						if remote_modified and str(remote_modified) <= str(local_modified):
+							should_update = False
+
+				if should_update:
+					if frappe.db.exists(doctype, name):
+						# Direct DB write bypasses on_update → NestedSet.on_update →
+						# update_nsm → update_move_node → validate_loop
+						update_fields = {k: v for k, v in remote_data.items()
+							if k not in ("name", "doctype")}
+						if update_fields:
+							frappe.db.set_value(doctype, name, update_fields, update_modified=False)
+					else:
+						if not remote_data.get(parent_field):
+							existing_root = frappe.db.get_value(
+								doctype, {parent_field: ("in", ["", None])}, "name"
+							)
+							if existing_root and name != existing_root:
+								remote_data[parent_field] = existing_root
+
+						remote_data["doctype"] = doctype
+						doc = frappe.get_doc(remote_data)
+						doc.flags.ignore_permissions = True
+						doc.flags.ignore_mandatory = True
+						doc.flags.ignore_validate = True
+						doc.insert()
+
+					rebuild_tree(doctype, parent_field)
 					frappe.db.commit()
 
-				elif self.settings.conflict_resolution == "Latest Timestamp Wins":
-					remote_modified = remote_data.get("modified")
-					if remote_modified and remote_modified > str(local_doc.modified):
+			else:
+				if frappe.db.exists(doctype, name):
+					local_doc = frappe.get_doc(doctype, name)
+
+					should_update = False
+					if self.settings.conflict_resolution == "Live Server Wins":
+						should_update = True
+					elif self.settings.conflict_resolution == "Latest Timestamp Wins":
+						remote_modified = remote_data.get("modified")
+						if remote_modified and remote_modified > str(local_doc.modified):
+							should_update = True
+
+					if should_update:
 						local_doc.update(remote_data)
 						local_doc.save(ignore_permissions=True)
 						frappe.db.commit()
-
-			else:
-				# Create new document (remote_data from API does not include "doctype")
-				remote_data["doctype"] = doctype
-				doc = frappe.get_doc(remote_data)
-				doc.insert(ignore_permissions=True)
-				frappe.db.commit()
+				else:
+					remote_data["doctype"] = doctype
+					doc = frappe.get_doc(remote_data)
+					doc.insert(ignore_permissions=True)
+					frappe.db.commit()
 
 		except Exception as e:
 			raise Exception(f"Failed to update local record: {str(e)}")

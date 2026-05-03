@@ -53,6 +53,30 @@ frappe.listview_settings['Sync Queue'] = {
 			}, __('Reject Items'));
 		});
 
+		// Retry Selected (for Failed items)
+		listview.page.add_menu_item(__('Retry Selected (Failed → Pending)'), () => {
+			const selected = listview.get_checked_items();
+			if (!selected.length) {
+				frappe.msgprint(__('Please select items first'));
+				return;
+			}
+			const failed = selected.filter(d => d.status === 'Failed');
+			if (!failed.length) {
+				frappe.msgprint(__('No failed items selected'));
+				return;
+			}
+			const names = failed.map(d => d.name);
+			frappe.confirm(__('Reset {0} failed items back to Pending?', [names.length]), () => {
+				frappe.call({
+					method: 'plus_care_sync.sync_manager.doctype.sync_queue.sync_queue.bulk_retry',
+					args: { names },
+					freeze: true,
+					freeze_message: __('Resetting...'),
+					callback: () => listview.refresh()
+				});
+			});
+		});
+
 		// Publish button (secondary action - visible)
 		listview.page.set_secondary_action(__('Publish'), () => {
 			const selected = listview.get_checked_items();

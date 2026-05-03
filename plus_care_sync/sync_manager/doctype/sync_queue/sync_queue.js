@@ -75,6 +75,23 @@ frappe.ui.form.on('Sync Queue', {
 			}, __('Actions'));
 		}
 
+		if (frm.doc.status === 'Failed') {
+			frm.add_custom_button(__('Retry (Reset to Pending)'), function() {
+				frappe.confirm(
+					__('Reset this item back to Pending so it can be re-approved?'),
+					function() {
+						frappe.call({
+							method: 'retry',
+							doc: frm.doc,
+							callback: function(r) {
+								frm.reload_doc();
+							}
+						});
+					}
+				);
+			}, __('Actions')).addClass('btn-warning');
+		}
+
 		// Show status indicator
 		if (frm.doc.status === 'Pending') {
 			frm.page.set_indicator(__('Pending Review'), 'orange');

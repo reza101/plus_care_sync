@@ -10,6 +10,7 @@
   "sync_mode",
   "column_break_1",
   "sync_frequency",
+  "scheduled_time",
   "sync_direction_section",
   "sync_direction",
   "conflict_resolution",
@@ -79,6 +80,13 @@
    "fieldtype": "Select",
    "label": "Sync Frequency",
    "options": "\nEvery 5 Minutes\nEvery 15 Minutes\nEvery 30 Minutes\nEvery Hour\nEvery 6 Hours\nOnce Daily"
+  },
+  {
+   "depends_on": "eval:doc.sync_mode=='Scheduled'",
+   "description": "Time of day to run the scheduled sync (24-hour format)",
+   "fieldname": "scheduled_time",
+   "fieldtype": "Time",
+   "label": "Scheduled Time"
   },
   {
    "fieldname": "sync_direction_section",
