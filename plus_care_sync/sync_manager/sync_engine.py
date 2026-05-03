@@ -19,6 +19,9 @@ class SyncEngine:
 		self.api_secret = self.settings.get_password("api_secret")
 		# Use queue for Manual mode, direct sync for Automatic
 		self.use_queue = self.settings.sync_mode == "Manual"
+		# FIX 1: Track outgoing names per doctype to prevent pulling them back
+		# in the same bidirectional sync run (loop prevention)
+		self._pushed_this_session = {}  # {doctype: set(names)}
 
 	def get_headers(self):
 		"""Get API headers for remote requests"""
@@ -94,6 +97,8 @@ class SyncEngine:
 						else:
 							self.push_to_remote(doc)
 
+					# FIX 1: Mark this record as pushed so pull_from_remote skips it
+					self._pushed_this_session.setdefault(doctype, set()).add(record.name)
 					synced_count += 1
 
 				except Exception as e:
@@ -156,6 +161,10 @@ class SyncEngine:
 				"order_by": "modified desc"
 			}
 
+			# FIX 2: Only pull records changed since last sync (incremental pull)
+			if self.settings.last_sync_time:
+				params["filters"] = json.dumps([["modified", ">", str(self.settings.last_sync_time)]])
+
 			response = requests.get(
 				endpoint,
 				params=params,
@@ -173,16 +182,23 @@ class SyncEngine:
 				self.log_sync_info(doctype, "No records found to sync. Total: 0")
 				return 0
 
+			# FIX 1: Skip records we already pushed this session (loop prevention)
+			pushed = self._pushed_this_session.get(doctype, set())
+
+			synced_count = 0
 			for record in records:
+				if record.get("name") in pushed:
+					continue  # We just pushed this — don't pull it back
 				try:
 					if self.use_queue:
 						self.add_to_queue(doctype, record, "Incoming (Live → Local)")
 					else:
 						self.update_local_record(doctype, record)
+					synced_count += 1
 				except Exception as e:
 					self.log_sync_error(doctype, record.get("name"), str(e))
 
-			return len(records)
+			return synced_count
 
 		except Exception as e:
 			self.log_sync_error(doctype, None, str(e))
@@ -300,6 +316,9 @@ class SyncEngine:
 						remote_modified = remote_data.get("modified")
 						if remote_modified and str(remote_modified) <= str(local_modified):
 							should_update = False
+					elif self.settings.conflict_resolution == "Local Server Wins":
+						# FIX 3: explicit local-wins — skip update
+						should_update = False
 
 				if should_update:
 					if frappe.db.exists(doctype, name):
@@ -338,6 +357,8 @@ class SyncEngine:
 						remote_modified = remote_data.get("modified")
 						if remote_modified and remote_modified > str(local_doc.modified):
 							should_update = True
+					# FIX 3: "Local Server Wins" or unrecognized value — keep local, skip update
+					# (should_update stays False — explicit, not a silent accident)
 
 					if should_update:
 						local_doc.update(remote_data)
