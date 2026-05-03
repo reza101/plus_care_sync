@@ -278,16 +278,18 @@ class SyncEngine:
 				})
 				queue_doc.insert(ignore_permissions=True)
 
-			# Log fetched record
-			self.log_fetch(doctype, data.get("name"), direction, is_new)
+			# Only log when a genuinely new item enters the queue.
+			# Re-logging existing pending items on every poll floods the Sync Log.
+			if is_new:
+				self.log_fetch(doctype, data.get("name"), direction)
 
 			frappe.db.commit()
 
 		except Exception as e:
 			self.log_sync_error(doctype, data.get("name"), f"Failed to queue: {str(e)}")
 
-	def log_fetch(self, doctype, docname, direction, is_new=True):
-		"""Log fetched record to Sync Log"""
+	def log_fetch(self, doctype, docname, direction):
+		"""Log a newly queued record to Sync Log"""
 		try:
 			frappe.get_doc({
 				"doctype": "Sync Log",
@@ -296,7 +298,7 @@ class SyncEngine:
 				"document_name": docname,
 				"status": "Queued",
 				"records_synced": 1,
-				"sync_details": f"Direction: {direction}\nAction: {'New item added to queue' if is_new else 'Existing item updated in queue'}"
+				"sync_details": f"Direction: {direction}\nAction: New item added to queue"
 			}).insert(ignore_permissions=True)
 		except:
 			pass
