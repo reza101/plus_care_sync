@@ -68,16 +68,18 @@ class SyncEngine:
 	def sync_doctype(self, doctype):
 		"""Sync a specific doctype"""
 		try:
-			# Get records modified since last sync
+			batch_size = int(self.settings.batch_size or 50)
 			filters = {}
 			if self.settings.last_sync_time:
 				filters["modified"] = [">", self.settings.last_sync_time]
 
+			# Fetch up to batch_size records, newest first so recent changes are prioritized
 			records = frappe.get_all(
 				doctype,
 				filters=filters,
 				fields=["name", "modified"],
-				limit=self.settings.batch_size or 50
+				order_by="modified desc",
+				limit_page_length=batch_size
 			)
 
 			synced_count = 0
@@ -88,10 +90,8 @@ class SyncEngine:
 
 					if self.settings.sync_direction in ["Local to Live (One Way)", "Bidirectional (Two Way)"]:
 						if self.use_queue:
-							# Add to queue for review before pushing
 							self.add_to_queue(doctype, doc.as_dict(), "Outgoing (Local → Live)")
 						else:
-							# Direct push (Automatic mode)
 							self.push_to_remote(doc)
 
 					synced_count += 1
@@ -149,21 +149,16 @@ class SyncEngine:
 			encoded_doctype = quote(doctype)
 			endpoint = f"{self.remote_url}/api/resource/{encoded_doctype}"
 
+			batch_size = int(self.settings.batch_size or 50)
 			params = {
 				"fields": '["*"]',
-				"limit_page_length": self.settings.batch_size or 50
+				"limit_page_length": batch_size,
+				"order_by": "modified desc"
 			}
 
-			# Only filter by last_sync_time if it exists
-			# Remove this filter to fetch ALL records (for first sync or full refresh)
-			# if self.settings.last_sync_time:
-			# 	params["filters"] = f'[["modified", ">", "{self.settings.last_sync_time}"]]'
-
-			# Log the request for debugging
-			frappe.log_error(
-				f"Fetching {doctype} from {endpoint}\nParams: {params}",
-				"Plus Care Sync - Debug Request"
-			)
+			# Only fetch records modified since last sync
+			if self.settings.last_sync_time:
+				params["filters"] = f'[["modified", ">", "{self.settings.last_sync_time}"]]'
 
 			response = requests.get(
 				endpoint,
@@ -172,34 +167,26 @@ class SyncEngine:
 				timeout=30
 			)
 
-			# Log response for debugging
-			frappe.log_error(
-				f"Response status: {response.status_code}\nResponse: {response.text[:500] if response.text else 'No response'}",
-				"Plus Care Sync - Debug Response"
-			)
-
-			if response.status_code == 200:
-				data = response.json()
-				records = data.get("data", [])
-
-				if not records:
-					# Log that no records were found
-					self.log_sync_info(doctype, f"No records found to sync. Total: 0")
-
-				for record in records:
-					try:
-						if self.use_queue:
-							# Add to queue for review
-							self.add_to_queue(doctype, record, "Incoming (Live → Local)")
-						else:
-							# Direct update (Automatic mode)
-							self.update_local_record(doctype, record)
-					except Exception as e:
-						self.log_sync_error(doctype, record.get("name"), str(e))
-
-				return len(records)
-			else:
+			if response.status_code != 200:
 				raise Exception(f"Failed to pull from remote (HTTP {response.status_code}): {response.text}")
+
+			data = response.json()
+			records = data.get("data", [])
+
+			if not records:
+				self.log_sync_info(doctype, "No records found to sync. Total: 0")
+				return 0
+
+			for record in records:
+				try:
+					if self.use_queue:
+						self.add_to_queue(doctype, record, "Incoming (Live → Local)")
+					else:
+						self.update_local_record(doctype, record)
+				except Exception as e:
+					self.log_sync_error(doctype, record.get("name"), str(e))
+
+			return len(records)
 
 		except Exception as e:
 			self.log_sync_error(doctype, None, str(e))
