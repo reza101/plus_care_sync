@@ -301,6 +301,23 @@ class SyncEngine:
 		except:
 			pass
 
+	def _strip_unknown_fields(self, doctype, data):
+		"""Return a copy of data containing only fields that exist in the local doctype meta.
+
+		Prevents "Unknown field" errors when the remote server has custom fields or a
+		newer schema that hasn't been applied locally yet.
+		"""
+		meta = frappe.get_meta(doctype)
+		known_fields = {f.fieldname for f in meta.fields}
+		# Always keep Frappe standard/system columns so inserts/updates stay valid.
+		system_fields = {
+			"name", "doctype", "owner", "creation", "modified",
+			"modified_by", "docstatus", "idx", "parent", "parenttype",
+			"parentfield",
+		}
+		allowed = known_fields | system_fields
+		return {k: v for k, v in data.items() if k in allowed}
+
 	def update_local_record(self, doctype, remote_data, skip_rebuild=False):
 		"""Update local record with remote data.
 
@@ -312,6 +329,10 @@ class SyncEngine:
 
 			for field in ("lft", "rgt", "old_parent"):
 				remote_data.pop(field, None)
+
+			# Drop any fields that don't exist in the local schema to avoid
+			# "Unknown field" errors from custom fields or version mismatches.
+			remote_data = self._strip_unknown_fields(doctype, remote_data)
 
 			meta = frappe.get_meta(doctype)
 			is_tree = bool(meta.get("is_tree"))
