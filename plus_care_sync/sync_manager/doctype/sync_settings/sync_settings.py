@@ -131,8 +131,30 @@ def auto_sync():
 		return
 
 	if settings.sync_mode == "Automatic":
+		frequency_map = {
+			"Every 5 Minutes": 300,
+			"Every 15 Minutes": 900,
+			"Every 30 Minutes": 1800,
+			"Every Hour": 3600,
+			"Every 6 Hours": 21600,
+			"Once Daily": 86400,
+		}
+
+		interval = frequency_map.get(settings.sync_frequency, 300)
+		now = datetime.now()
+
+		if settings.last_sync_time:
+			last = settings.last_sync_time
+			if isinstance(last, str):
+				last = datetime.strptime(last, "%Y-%m-%d %H:%M:%S.%f" if "." in last else "%Y-%m-%d %H:%M:%S")
+			if (now - last).total_seconds() < interval:
+				return  # Not enough time has passed since last sync
+
 		from plus_care_sync.sync_manager.sync_engine import execute_sync
 		execute_sync()
+
+		# Record when this auto-sync ran so the next invocation can check elapsed time
+		frappe.db.set_value("Sync Settings", "Sync Settings", "last_sync_time", now, update_modified=False)
 
 	elif settings.sync_mode == "Scheduled" and settings.scheduled_time:
 		# Build today's scheduled datetime from the Time field value.
