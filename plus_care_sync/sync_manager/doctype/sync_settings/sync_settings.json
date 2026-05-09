@@ -37,6 +37,7 @@
   "test_connection",
   "sync_status_section",
   "last_sync_time",
+  "reset_last_sync_time",
   "sync_status",
   "column_break_4",
   "total_synced_records",
@@ -236,6 +237,12 @@
    "fieldtype": "Datetime",
    "label": "Last Sync Time",
    "read_only": 1
+  },
+  {
+   "description": "Clears Last Sync Time so the next sync pulls all records from scratch (full re-sync)",
+   "fieldname": "reset_last_sync_time",
+   "fieldtype": "Button",
+   "label": "Reset Last Sync Time"
   },
   {
    "default": "Idle",

@@ -8,6 +8,41 @@ from frappe import _
 from datetime import datetime
 from urllib.parse import quote
 
+# Frappe modules that are pure infrastructure — they contain system config,
+# audit logs, and schema definitions, not business data. Excluded from Full
+# Database sync so we don't flood the queue with irrelevant noise.
+_SYSTEM_MODULES = {
+	"Core", "Custom", "Desk", "Printing", "Social", "Geo",
+	"Data Migration", "Bot", "Integrations", "Patch",
+}
+
+# Individual doctypes always excluded regardless of module — covers stragglers
+# from modules that are partly business (e.g. Email, Workflow) and our own
+# app internals that must never be pushed/pulled.
+_EXCLUDED_DOCTYPES = {
+	# This app's own internals
+	"Sync Log", "Sync Queue", "Sync Settings", "Sync DocType",
+	# Audit / system logs
+	"Version", "Access Log", "Route History", "Error Log",
+	"Error Snapshot", "Scheduled Job Log", "Activity Log",
+	"Deleted Document", "Log Settings", "Background Job Log",
+	# Schema / meta
+	"DocType", "DocField", "DocPerm", "Custom DocPerm",
+	"Property Setter", "Custom Field", "Client Script",
+	"Server Script", "DocType Action", "DocType Link", "DocType State",
+	# Job queue
+	"RQ Job", "RQ Worker", "Scheduled Job Type",
+	# Web / onboarding UI
+	"Form Tour", "Onboarding Step", "Onboarding Permission",
+	"Module Onboarding", "Web Template", "Web Template Field",
+	"Workspace", "Workspace Link", "Workspace Chart",
+	"Workspace Shortcut", "Workspace Quick List",
+	# Misc system
+	"Patch Log", "Process Subscription", "Translation",
+	"Number Card", "Dashboard", "Dashboard Chart",
+	"Notification", "Notification Log",
+}
+
 
 def _parse_dt(value):
 	"""Coerce a datetime, date, or ISO string to a datetime object for safe comparison."""
@@ -15,7 +50,8 @@ def _parse_dt(value):
 		return None
 	if isinstance(value, datetime):
 		return value
-	s = str(value)
+	# Normalise ISO 'T' separator to space so all formats below match consistently
+	s = str(value).replace("T", " ")
 	for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
 		try:
 			return datetime.strptime(s, fmt)
@@ -50,8 +86,18 @@ class SyncEngine:
 		doctypes = []
 
 		if self.settings.data_type == "Full Database":
-			# Get all doctypes (you may want to filter system doctypes)
-			doctypes = frappe.get_all("DocType", filters={"issingle": 0, "istable": 0}, pluck="name")
+			# Exclude system/infrastructure modules and individual system doctypes
+			# so only actual business data is synced.
+			all_doctypes = frappe.get_all(
+				"DocType",
+				filters={"issingle": 0, "istable": 0},
+				fields=["name", "module"],
+			)
+			doctypes = [
+				d.name for d in all_doctypes
+				if d.module not in _SYSTEM_MODULES
+				and d.name not in _EXCLUDED_DOCTYPES
+			]
 		else:
 			# Selective modules
 			if self.settings.sync_sales:
@@ -83,6 +129,30 @@ class SyncEngine:
 
 		return list(set(doctypes))  # Remove duplicates
 
+	def _iter_local_records(self, doctype, filters, batch_size, full_sync):
+		"""Yield local records one page at a time.
+
+		In incremental mode (full_sync=False) only one page is fetched.
+		In full-sync mode pages are fetched lazily until exhausted so memory
+		usage stays constant at one batch regardless of doctype size.
+		"""
+		start = 0
+		while True:
+			page = frappe.get_all(
+				doctype,
+				filters=filters,
+				fields=["name", "modified"],
+				order_by="modified desc",
+				limit_start=start,
+				limit_page_length=batch_size,
+			)
+			if not page:
+				break
+			yield from page
+			if not full_sync or len(page) < batch_size:
+				break
+			start += batch_size
+
 	def sync_doctype(self, doctype):
 		"""Sync a specific doctype"""
 		try:
@@ -91,18 +161,16 @@ class SyncEngine:
 			if self.settings.last_sync_time:
 				filters["modified"] = [">", self.settings.last_sync_time]
 
-			# Fetch up to batch_size records, newest first so recent changes are prioritized
-			records = frappe.get_all(
-				doctype,
-				filters=filters,
-				fields=["name", "modified"],
-				order_by="modified desc",
-				limit_page_length=batch_size
+			# Full Database with no last_sync_time = initial full sync → page through all.
+			# Incremental (last_sync_time set) → one batch is enough (only changed records).
+			full_sync = (
+				self.settings.data_type == "Full Database"
+				and not self.settings.last_sync_time
 			)
 
 			synced_count = 0
 
-			for record in records:
+			for record in self._iter_local_records(doctype, filters, batch_size, full_sync):
 				try:
 					doc = frappe.get_doc(doctype, record.name)
 
@@ -162,6 +230,27 @@ class SyncEngine:
 		except Exception as e:
 			raise Exception(f"Failed to push to remote: {str(e)}")
 
+	def _iter_remote_records(self, endpoint, base_params, batch_size, full_sync):
+		"""Yield remote records one page at a time.
+
+		In incremental mode (full_sync=False) a single API call is made.
+		In full-sync mode pages are fetched lazily with limit_start so only
+		one batch lives in memory at a time regardless of how large the doctype is.
+		"""
+		start = 0
+		while True:
+			params = dict(base_params, limit_start=start)
+			response = requests.get(endpoint, params=params, headers=self.get_headers(), timeout=30)
+			if response.status_code != 200:
+				raise Exception(f"Failed to pull from remote (HTTP {response.status_code}): {response.text}")
+			page = response.json().get("data", [])
+			if not page:
+				break
+			yield from page
+			if not full_sync or len(page) < batch_size:
+				break
+			start += batch_size
+
 	def pull_from_remote(self, doctype):
 		"""Pull documents from remote server"""
 		try:
@@ -170,7 +259,7 @@ class SyncEngine:
 			endpoint = f"{self.remote_url}/api/resource/{encoded_doctype}"
 
 			batch_size = int(self.settings.batch_size or 50)
-			params = {
+			base_params = {
 				"fields": '["*"]',
 				"limit_page_length": batch_size,
 				"order_by": "modified desc"
@@ -178,31 +267,24 @@ class SyncEngine:
 
 			# FIX 2: Only pull records changed since last sync (incremental pull)
 			if self.settings.last_sync_time:
-				params["filters"] = json.dumps([["modified", ">", str(self.settings.last_sync_time)]])
+				base_params["filters"] = json.dumps([["modified", ">", str(self.settings.last_sync_time)]])
 
-			response = requests.get(
-				endpoint,
-				params=params,
-				headers=self.get_headers(),
-				timeout=30
+			# Full Database with no last_sync_time = initial full sync → page through all.
+			# Incremental (last_sync_time set) → one batch per doctype is enough.
+			full_sync = (
+				self.settings.data_type == "Full Database"
+				and not self.settings.last_sync_time
 			)
-
-			if response.status_code != 200:
-				raise Exception(f"Failed to pull from remote (HTTP {response.status_code}): {response.text}")
-
-			data = response.json()
-			records = data.get("data", [])
-
-			if not records:
-				self.log_sync_info(doctype, "No records found to sync. Total: 0")
-				return 0
 
 			# FIX 1: Skip records we already pushed this session (loop prevention)
 			pushed = self._pushed_this_session.get(doctype, set())
 
 			synced_count = 0
-			needs_tree_rebuild = None  # (doctype, parent_field) if any tree records were written
-			for record in records:
+			needs_tree_rebuild = None
+			found_any = False
+
+			for record in self._iter_remote_records(endpoint, base_params, batch_size, full_sync):
+				found_any = True
 				if record.get("name") in pushed:
 					continue  # We just pushed this — don't pull it back
 				try:
@@ -215,6 +297,9 @@ class SyncEngine:
 					synced_count += 1
 				except Exception as e:
 					self.log_sync_error(doctype, record.get("name"), str(e))
+
+			if not found_any:
+				self.log_sync_info(doctype, "No records found to sync. Total: 0")
 
 			# Rebuild tree once after all records are written, not once per record
 			if needs_tree_rebuild:

@@ -151,6 +151,21 @@ frappe.ui.form.on('Sync Settings', {
 		frappe.set_route('List', 'Sync Log');
 	},
 
+	reset_last_sync_time: function(frm) {
+		frappe.confirm(
+			__('Clear Last Sync Time? The next sync will pull all records from scratch (full re-sync).'),
+			function() {
+				frappe.call({
+					method: 'reset_last_sync_time',
+					doc: frm.doc,
+					callback: function(r) {
+						frm.reload_doc();
+					}
+				});
+			}
+		);
+	},
+
 	enable_sync: function(frm) {
 		if (frm.doc.enable_sync) {
 			frm.set_df_property('sync_mode', 'reqd', 1);

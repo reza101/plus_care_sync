@@ -94,6 +94,18 @@ class SyncSettings(Document):
 		self.save()
 
 	@frappe.whitelist()
+	def reset_last_sync_time(self):
+		"""Clear last sync time to force a full re-sync on next run"""
+		frappe.db.set_value("Sync Settings", "Sync Settings", "last_sync_time", None)
+		frappe.db.commit()
+		self.last_sync_time = None
+		frappe.msgprint(
+			_("Last Sync Time cleared. Next sync will pull all records from scratch."),
+			indicator="blue",
+			alert=True
+		)
+
+	@frappe.whitelist()
 	def sync_now(self):
 		"""Manually trigger sync"""
 		if not self.enable_sync:
@@ -146,6 +158,8 @@ def auto_sync():
 		if settings.last_sync_time:
 			last = settings.last_sync_time
 			if isinstance(last, str):
+				# Frappe may store datetimes with ISO 'T' separator — normalise to space
+				last = last.replace("T", " ")
 				last = datetime.strptime(last, "%Y-%m-%d %H:%M:%S.%f" if "." in last else "%Y-%m-%d %H:%M:%S")
 			if (now - last).total_seconds() < interval:
 				return  # Not enough time has passed since last sync
