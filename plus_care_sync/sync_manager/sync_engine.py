@@ -16,6 +16,48 @@ _SYSTEM_MODULES = {
 	"Data Migration", "Bot", "Integrations", "Patch",
 }
 
+# Sync order matters: foundational doctypes must arrive before the records that
+# reference them.  Company is most critical — its abbr rename cascades to
+# Warehouse, Account, and Cost Center names.  Everything not listed here syncs
+# after all priority doctypes, in arbitrary order.
+_SYNC_PRIORITY = [
+	# ── Level 0: true foundations ──────────────────────────────────────────
+	"Company",          # abbr drives Warehouse / Account / Cost Center names
+	"Currency",         # referenced by Company, Price List, transactions
+	"Country",          # referenced by Company, Address
+	"UOM Category",     # parent of UOM
+	"UOM",              # referenced by Item, Stock Entry
+	# ── Level 1: master trees (parent nodes before child records) ──────────
+	"Item Group",       # tree; Item.item_group → Item Group
+	"Customer Group",   # tree; Customer.customer_group
+	"Supplier Group",   # tree; Supplier.supplier_group
+	"Territory",        # tree; Customer.territory, Sales Order.territory
+	"Sales Person",     # tree; used in sales transactions
+	"Department",       # tree; Employee.department
+	"Cost Center",      # tree; depends on Company abbr
+	"Account",          # tree; depends on Company abbr
+	"Warehouse",        # tree; depends on Company abbr
+	# ── Level 2: core masters ──────────────────────────────────────────────
+	"Price List",       # referenced by Item Price, POS Profile
+	"Item",             # referenced by all stock/sales/purchase doctypes
+	"Item Price",       # depends on Item + Price List
+	"Customer",         # referenced by sales transactions
+	"Supplier",         # referenced by purchase transactions
+	"Contact",          # links to Customer / Supplier
+	"Address",          # links to Customer / Supplier
+	"Employee",         # referenced by HR doctypes
+	"Designation",      # referenced by Employee
+	"Branch",           # referenced by Employee
+	# ── Level 3: transaction support ───────────────────────────────────────
+	"Payment Terms Template",
+	"Terms and Conditions",
+	"Tax Category",
+	"Sales Taxes and Charges Template",
+	"Purchase Taxes and Charges Template",
+	"POS Profile",
+	"Shipping Rule",
+]
+
 # Individual doctypes always excluded regardless of module — covers stragglers
 # from modules that are partly business (e.g. Email, Workflow) and our own
 # app internals that must never be pushed/pulled.
@@ -127,7 +169,13 @@ class SyncEngine:
 					if row.enabled:
 						doctypes.append(row.doctype_name)
 
-		return list(set(doctypes))  # Remove duplicates
+		# Deduplicate then sort: priority doctypes first (in declared order),
+		# everything else appended after in stable order.
+		unique = list(dict.fromkeys(doctypes))  # preserves insertion order, drops dupes
+		priority_set = {d: i for i, d in enumerate(_SYNC_PRIORITY)}
+		high = [d for d in _SYNC_PRIORITY if d in set(unique)]
+		rest = [d for d in unique if d not in priority_set]
+		return high + rest
 
 	def _iter_local_records(self, doctype, filters, batch_size, full_sync):
 		"""Yield local records one page at a time.
@@ -259,10 +307,14 @@ class SyncEngine:
 			endpoint = f"{self.remote_url}/api/resource/{encoded_doctype}"
 
 			batch_size = int(self.settings.batch_size or 50)
+			# Tree doctypes (Account, Warehouse, Cost Center, Item Group …) must be
+			# fetched root-first so every parent exists before its children are inserted.
+			meta = frappe.get_meta(doctype)
+			order_by = "lft asc" if meta.get("is_tree") else "modified desc"
 			base_params = {
 				"fields": '["*"]',
 				"limit_page_length": batch_size,
-				"order_by": "modified desc"
+				"order_by": order_by
 			}
 
 			# FIX 2: Only pull records changed since last sync (incremental pull)
@@ -270,11 +322,11 @@ class SyncEngine:
 				base_params["filters"] = json.dumps([["modified", ">", str(self.settings.last_sync_time)]])
 
 			# Full Database with no last_sync_time = initial full sync → page through all.
-			# Incremental (last_sync_time set) → one batch per doctype is enough.
-			full_sync = (
-				self.settings.data_type == "Full Database"
-				and not self.settings.last_sync_time
-			)
+			# When last_sync_time is not set it is an initial full sync regardless
+			# of data_type — page through ALL remote records so no records are missed.
+			# When last_sync_time is set (incremental) one batch is enough because
+			# only recently changed records are returned.
+			full_sync = not self.settings.last_sync_time
 
 			# FIX 1: Skip records we already pushed this session (loop prevention)
 			pushed = self._pushed_this_session.get(doctype, set())

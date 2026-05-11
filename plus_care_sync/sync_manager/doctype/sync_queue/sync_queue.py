@@ -106,6 +106,21 @@ class SyncQueue(Document):
 
 			frappe.throw(_("Failed to publish: {0}").format(str(e)))
 
+	def _strip_unknown_fields(self, doctype, data):
+		"""Drop fields that don't exist in the local schema.
+
+		Prevents 'Unknown column' errors when the remote server has custom fields
+		or a different schema version than the local installation.
+		"""
+		meta = frappe.get_meta(doctype)
+		known_fields = {f.fieldname for f in meta.fields}
+		system_fields = {
+			"name", "doctype", "owner", "creation", "modified",
+			"modified_by", "docstatus", "idx", "parent", "parenttype", "parentfield",
+		}
+		allowed = known_fields | system_fields
+		return {k: v for k, v in data.items() if k in allowed}
+
 	def _create_or_update_local(self, data):
 		"""Create or update local record"""
 		from frappe.utils.nestedset import rebuild_tree
@@ -121,6 +136,10 @@ class SyncQueue(Document):
 		]
 		for field in fields_to_remove:
 			data.pop(field, None)
+
+		# Drop fields that don't exist locally to avoid "Unknown column" errors
+		# from schema mismatches or custom fields on the remote server.
+		data = self._strip_unknown_fields(doctype, data)
 
 		meta = frappe.get_meta(doctype)
 		is_tree = bool(meta.get("is_tree"))
