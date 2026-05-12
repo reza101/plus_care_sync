@@ -29,6 +29,8 @@ class SyncSettings(Document):
 					self.sync_customers,
 					self.sync_items,
 					self.sync_hr,
+					self.sync_printing,
+					self.sync_erp_settings,
 					self.sync_custom_doctypes
 				])
 				if not has_selection:

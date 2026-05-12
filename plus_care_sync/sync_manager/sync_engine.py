@@ -12,9 +12,21 @@ from urllib.parse import quote
 # audit logs, and schema definitions, not business data. Excluded from Full
 # Database sync so we don't flood the queue with irrelevant noise.
 _SYSTEM_MODULES = {
-	"Core", "Custom", "Desk", "Printing", "Social", "Geo",
+	"Core", "Custom", "Desk", "Social", "Geo",
 	"Data Migration", "Bot", "Integrations", "Patch",
 }
+
+# Single doctypes that hold ERP configuration. Excluded by the normal issingle=0
+# filter so handled separately via sync_erp_settings().
+_SINGLE_SETTINGS_DOCTYPES = [
+	"Print Settings",
+	"Accounts Settings",
+	"Stock Settings",
+	"Buying Settings",
+	"Selling Settings",
+	"POS Settings",
+	"HR Settings",
+]
 
 # Sync order matters: foundational doctypes must arrive before the records that
 # reference them.  Company is most critical — its abbr rename cascades to
@@ -38,6 +50,8 @@ _SYNC_PRIORITY = [
 	"Account",          # tree; depends on Company abbr
 	"Warehouse",        # tree; depends on Company abbr
 	# ── Level 2: core masters ──────────────────────────────────────────────
+	"Letter Head",      # required by invoices — must exist before transactions
+	"Print Format",     # referenced by doctypes for default print format
 	"Price List",       # referenced by Item Price, POS Profile
 	"Item",             # referenced by all stock/sales/purchase doctypes
 	"Item Price",       # depends on Item + Price List
@@ -143,10 +157,12 @@ class SyncEngine:
 		else:
 			# Selective modules
 			if self.settings.sync_sales:
-				doctypes.extend(["Sales Order", "Sales Invoice", "Quotation"])
+				# Letter Head is required to print Sales Invoices — sync it automatically
+				doctypes.extend(["Letter Head", "Sales Order", "Sales Invoice", "Quotation"])
 
 			if self.settings.sync_purchase:
-				doctypes.extend(["Purchase Order", "Purchase Invoice", "Purchase Receipt"])
+				# Letter Head is required to print Purchase Invoices — sync it automatically
+				doctypes.extend(["Letter Head", "Purchase Order", "Purchase Invoice", "Purchase Receipt"])
 
 			if self.settings.sync_stock:
 				doctypes.extend(["Stock Entry", "Delivery Note", "Material Request"])
@@ -162,6 +178,9 @@ class SyncEngine:
 
 			if self.settings.sync_hr:
 				doctypes.extend(["Employee", "Salary Slip", "Attendance", "Leave Application"])
+
+			if self.settings.sync_printing:
+				doctypes.extend(["Letter Head", "Print Format", "Print Style"])
 
 			# Add custom doctypes
 			if self.settings.sync_custom_doctypes:
@@ -569,6 +588,64 @@ class SyncEngine:
 		except Exception as e:
 			raise Exception(f"Failed to update local record: {str(e)}")
 
+	def push_single_to_remote(self, doctype):
+		"""Push a Single doctype to the remote server."""
+		try:
+			doc = frappe.get_single(doctype)
+			data = doc.as_dict()
+			encoded = quote(doctype)
+			endpoint = f"{self.remote_url}/api/resource/{encoded}/{encoded}"
+			response = requests.put(
+				endpoint,
+				json=data,
+				headers=self.get_headers(),
+				timeout=30
+			)
+			if response.status_code not in [200, 201]:
+				raise Exception(f"Remote API error: {response.text}")
+		except Exception as e:
+			raise Exception(f"Failed to push single doctype {doctype} to remote: {str(e)}")
+
+	def pull_single_from_remote(self, doctype):
+		"""Pull a Single doctype from the remote server and apply locally."""
+		try:
+			encoded = quote(doctype)
+			endpoint = f"{self.remote_url}/api/resource/{encoded}/{encoded}"
+			response = requests.get(endpoint, headers=self.get_headers(), timeout=30)
+			if response.status_code != 200:
+				raise Exception(f"Remote API error (HTTP {response.status_code}): {response.text}")
+			remote_data = response.json().get("data", {})
+			if not remote_data:
+				return
+			remote_data = self._strip_unknown_fields(doctype, remote_data)
+			skip_fields = {"name", "doctype", "modified", "modified_by", "creation", "owner", "docstatus"}
+			for fieldname, value in remote_data.items():
+				if fieldname not in skip_fields:
+					try:
+						frappe.db.set_value(doctype, None, fieldname, value, update_modified=False)
+					except Exception:
+						pass
+			frappe.db.commit()
+		except Exception as e:
+			raise Exception(f"Failed to pull single doctype {doctype} from remote: {str(e)}")
+
+	def sync_erp_settings(self):
+		"""Sync all Single/Settings doctypes. Returns count of successful syncs."""
+		synced = 0
+		for doctype in _SINGLE_SETTINGS_DOCTYPES:
+			try:
+				if not frappe.db.exists("DocType", doctype):
+					continue
+				direction = self.settings.sync_direction
+				if direction in ("Local to Live (One Way)", "Bidirectional (Two Way)"):
+					self.push_single_to_remote(doctype)
+				if direction in ("Live to Local (One Way)", "Bidirectional (Two Way)"):
+					self.pull_single_from_remote(doctype)
+				synced += 1
+			except Exception as e:
+				self.log_sync_error(doctype, doctype, str(e))
+		return synced
+
 	def log_sync_error(self, doctype, docname, error):
 		"""Log sync errors"""
 		try:
@@ -602,6 +679,20 @@ def execute_sync():
 		doctypes = engine.get_doctypes_to_sync()
 
 		total_synced = 0
+
+		if settings.sync_erp_settings or settings.data_type == "Full Database":
+			settings_synced = engine.sync_erp_settings()
+			total_synced += settings_synced
+			sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
+			frappe.get_doc({
+				"doctype": "Sync Log",
+				"sync_type": sync_type,
+				"doctype_name": "ERP Settings",
+				"status": "Success",
+				"records_synced": settings_synced,
+				"sync_details": "Single/Settings doctypes synced"
+			}).insert(ignore_permissions=True)
+			frappe.db.commit()
 
 		for doctype in doctypes:
 			try:
@@ -737,3 +828,29 @@ def test_fetch_items():
 
 	except Exception as e:
 		return {"status": "error", "message": str(e), "success": False}
+
+
+@frappe.whitelist()
+def debug_settings_sync():
+	"""Debug why ERP settings are not syncing — tests each Single doctype individually."""
+	settings = frappe.get_single("Sync Settings")
+	api_secret = settings.get_password("api_secret")
+	headers = {
+		"Authorization": f"token {settings.api_key}:{api_secret}",
+		"Content-Type": "application/json"
+	}
+	results = {}
+	for doctype in _SINGLE_SETTINGS_DOCTYPES:
+		encoded = quote(doctype)
+		url = f"{settings.remote_url.rstrip('/')}/api/resource/{encoded}/{encoded}"
+		try:
+			r = requests.get(url, headers=headers, timeout=15)
+			data = r.json() if r.status_code == 200 else {}
+			results[doctype] = {
+				"http_status": r.status_code,
+				"has_data": bool(data.get("data")),
+				"error": r.text[:300] if r.status_code != 200 else None
+			}
+		except Exception as e:
+			results[doctype] = {"http_status": "exception", "error": str(e)}
+	return results

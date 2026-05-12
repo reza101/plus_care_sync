@@ -20,6 +20,8 @@
   "sync_sales",
   "sync_purchase",
   "sync_stock",
+  "sync_printing",
+  "sync_erp_settings",
   "column_break_2",
   "sync_accounting",
   "sync_customers",
@@ -174,6 +176,18 @@
    "fieldname": "sync_hr",
    "fieldtype": "Check",
    "label": "HR & Payroll"
+  },
+  {
+   "default": "0",
+   "fieldname": "sync_printing",
+   "fieldtype": "Check",
+   "label": "Printing (Letter Head, Print Format)"
+  },
+  {
+   "default": "0",
+   "fieldname": "sync_erp_settings",
+   "fieldtype": "Check",
+   "label": "ERP Settings & Configuration"
   },
   {
    "collapsible": 1,
