@@ -28,6 +28,12 @@ _EXPLICIT_INCLUDE_DOCTYPES = {
 	# Core module — needed as link targets for User
 	"Role",
 	"Role Profile",
+	# Geo module — referenced by Company, Address, Customer, Supplier, and
+	# almost every financial transaction; excluded by default but critical data
+	"Currency",
+	"Country",
+	# Core module — optional language field on Customer, Supplier, Lead, Print Format
+	"Language",
 }
 
 # Single doctypes that hold ERP configuration. Excluded by the normal issingle=0
@@ -78,12 +84,13 @@ _SYNC_PRIORITY = [
 	"Customer Group",   # tree; Customer.customer_group
 	"Supplier Group",   # tree; Supplier.supplier_group
 	"Territory",        # tree; Customer.territory, Sales Order.territory
-	"Sales Person",     # tree; used in sales transactions
-	"Department",       # tree; Employee.department
+	"Department",       # tree; Employee.department; referenced by Sales Person
+	"Sales Person",     # tree; used in sales transactions; links to Department
 	"Cost Center",      # tree; depends on Company abbr
 	"Account",          # tree; depends on Company abbr
 	"Warehouse",        # tree; depends on Company abbr
 	# ── Level 2: core masters ──────────────────────────────────────────────
+	"Language",         # Core module but explicitly included; Customer/Supplier/Lead language field
 	"Letter Head",      # required by invoices — must exist before transactions
 	"Print Format",     # referenced by doctypes for default print format
 	"Mode of Payment",  # referenced by POS Profile payments child table, Payment Entry
@@ -94,9 +101,9 @@ _SYNC_PRIORITY = [
 	"Supplier",         # referenced by purchase transactions
 	"Contact",          # links to Customer / Supplier
 	"Address",          # links to Customer / Supplier
-	"Employee",         # referenced by HR doctypes
 	"Designation",      # referenced by Employee
 	"Branch",           # referenced by Employee
+	"Employee",         # references Designation, Branch; referenced by HR doctypes
 	"Role",             # Core module but explicitly included; referenced by User (Has Role child table)
 	"Role Profile",     # Core module but explicitly included; referenced by User.role_profile_name
 	"User",             # Core module but explicitly included; linked to Employee and permissions
@@ -131,13 +138,13 @@ _SYNC_PRIORITY = [
 	"Industry Type",            # referenced by Lead, Customer
 	# ── Level 6: ERPNext manufacturing masters ───────────────────────────────
 	"Operation",                # referenced by BOM Operation, Workstation
-	"Workstation",              # references Operation; referenced by BOM, Job Card
 	"Workstation Type",         # referenced by Workstation
+	"Workstation",              # references Operation, Workstation Type; referenced by BOM, Job Card
 	"Routing",                  # references Operation/Workstation; referenced by BOM, Work Order
 	"BOM",                      # references Item, Routing; referenced by Work Order, Stock Entry
 	# ── Level 7: ERPNext project & asset masters ─────────────────────────────
-	"Project",                  # referenced by Task, Timesheet, Expense Claim, Stock Entry
 	"Project Type",             # referenced by Project
+	"Project",                  # references Project Type; referenced by Task, Timesheet, Expense Claim
 	"Asset Maintenance Template",   # referenced by Asset Maintenance
 	# ── Level 8: ERPNext CRM pipeline ────────────────────────────────────────
 	"Lead",                     # referenced by Opportunity, Quotation
