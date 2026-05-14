@@ -25,6 +25,9 @@ _EXPLICIT_INCLUDE_DOCTYPES = {
 	"Translation",
 	"Employee",
 	"POS Profile",
+	# Core module — needed as link targets for User
+	"Role",
+	"Role Profile",
 }
 
 # Single doctypes that hold ERP configuration. Excluded by the normal issingle=0
@@ -83,6 +86,7 @@ _SYNC_PRIORITY = [
 	# ── Level 2: core masters ──────────────────────────────────────────────
 	"Letter Head",      # required by invoices — must exist before transactions
 	"Print Format",     # referenced by doctypes for default print format
+	"Mode of Payment",  # referenced by POS Profile payments child table, Payment Entry
 	"Price List",       # referenced by Item Price, POS Profile
 	"Item",             # referenced by all stock/sales/purchase doctypes
 	"Item Price",       # depends on Item + Price List
@@ -93,6 +97,8 @@ _SYNC_PRIORITY = [
 	"Employee",         # referenced by HR doctypes
 	"Designation",      # referenced by Employee
 	"Branch",           # referenced by Employee
+	"Role",             # Core module but explicitly included; referenced by User (Has Role child table)
+	"Role Profile",     # Core module but explicitly included; referenced by User.role_profile_name
 	"User",             # Core module but explicitly included; linked to Employee and permissions
 	# ── Level 3: transaction support ───────────────────────────────────────
 	"Payment Terms Template",
@@ -105,7 +111,6 @@ _SYNC_PRIORITY = [
 	# ── Level 4: reference data ─────────────────────────────────────────────
 	"Translation",      # Core module but explicitly included for UI language sync
 	# ── Level 5: ERPNext extended masters ────────────────────────────────────
-	"Mode of Payment",          # referenced by Payment Entry, POS Profile, Bank Account
 	"Holiday List",             # referenced by Employee, Leave Type
 	"Bank",                     # referenced by Bank Account
 	"Bank Account",             # referenced by Payment Entry, Journal Entry
@@ -755,6 +760,7 @@ class SyncEngine:
 						doc.flags.ignore_permissions = True
 						doc.flags.ignore_mandatory = True
 						doc.flags.ignore_validate = True
+						doc.flags.ignore_links = True
 						doc.insert()
 						frappe.db.commit()
 
@@ -785,6 +791,7 @@ class SyncEngine:
 						local_doc.update(remote_data)
 						local_doc.flags.ignore_mandatory = True
 						local_doc.flags.ignore_validate = True
+						local_doc.flags.ignore_links = True
 						local_doc.save(ignore_permissions=True)
 						frappe.db.commit()
 				else:
@@ -793,6 +800,7 @@ class SyncEngine:
 					doc.flags.ignore_permissions = True
 					doc.flags.ignore_mandatory = True
 					doc.flags.ignore_validate = True
+					doc.flags.ignore_links = True
 					doc.insert()
 					frappe.db.commit()
 
