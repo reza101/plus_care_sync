@@ -1,6 +1,7 @@
 # Copyright (c) 2024, Pluscare Team and contributors
 # For license information, please see license.txt
 
+import os
 import frappe
 import requests
 import json
@@ -16,16 +17,46 @@ _SYSTEM_MODULES = {
 	"Data Migration", "Bot", "Integrations", "Patch",
 }
 
+# Doctypes that must always be synced even when their module is in _SYSTEM_MODULES.
+# User lives in Core (a system module) but is needed for user/permission sync.
+# Translation lives in Core but is needed for UI language sync.
+_EXPLICIT_INCLUDE_DOCTYPES = {
+	"User",
+	"Translation",
+	"Employee",
+	"POS Profile",
+}
+
 # Single doctypes that hold ERP configuration. Excluded by the normal issingle=0
 # filter so handled separately via sync_erp_settings().
 _SINGLE_SETTINGS_DOCTYPES = [
+	# Frappe core
 	"Print Settings",
+	# ERPNext — Accounts
 	"Accounts Settings",
+	"Subscription Settings",
+	"Currency Exchange Settings",
+	# ERPNext — Stock
 	"Stock Settings",
+	"Delivery Settings",
+	"Item Variant Settings",
+	"Stock Reposting Settings",
+	# ERPNext — Buying / Selling
 	"Buying Settings",
 	"Selling Settings",
+	# ERPNext — Setup
+	"Global Defaults",
+	# ERPNext — Manufacturing
+	"Manufacturing Settings",
+	# ERPNext — CRM / Projects / Support
+	"CRM Settings",
+	"Projects Settings",
+	"Support Settings",
+	# ERPNext — POS
 	"POS Settings",
+	# HRMS
 	"HR Settings",
+	"Payroll Settings",
 ]
 
 # Sync order matters: foundational doctypes must arrive before the records that
@@ -62,6 +93,7 @@ _SYNC_PRIORITY = [
 	"Employee",         # referenced by HR doctypes
 	"Designation",      # referenced by Employee
 	"Branch",           # referenced by Employee
+	"User",             # Core module but explicitly included; linked to Employee and permissions
 	# ── Level 3: transaction support ───────────────────────────────────────
 	"Payment Terms Template",
 	"Terms and Conditions",
@@ -70,6 +102,178 @@ _SYNC_PRIORITY = [
 	"Purchase Taxes and Charges Template",
 	"POS Profile",
 	"Shipping Rule",
+	# ── Level 4: reference data ─────────────────────────────────────────────
+	"Translation",      # Core module but explicitly included for UI language sync
+	# ── Level 5: ERPNext extended masters ────────────────────────────────────
+	"Mode of Payment",          # referenced by Payment Entry, POS Profile, Bank Account
+	"Holiday List",             # referenced by Employee, Leave Type
+	"Bank",                     # referenced by Bank Account
+	"Bank Account",             # referenced by Payment Entry, Journal Entry
+	"Currency Exchange",        # referenced by transactions with multi-currency
+	"Incoterm",                 # referenced by Sales/Purchase Order
+	"Item Manufacturer",        # references Item; referenced by BOM
+	"Product Bundle",           # references Item; used in Sales transactions
+	"Putaway Rule",             # references Warehouse; used in Stock Entry
+	"Quality Inspection Template",  # referenced by Quality Inspection
+	"Quality Procedure",        # referenced by Quality Inspection
+	"Asset Category",           # referenced by Asset
+	"Location",                 # referenced by Asset
+	"Warehouse Type",           # referenced by Warehouse
+	"Cost of Poor Quality Report", # Quality module master
+	"Lead Source",              # referenced by Lead, Opportunity
+	"Opportunity Type",         # referenced by Opportunity
+	"Sales Stage",              # referenced by Opportunity (CRM)
+	"Industry Type",            # referenced by Lead, Customer
+	# ── Level 6: ERPNext manufacturing masters ───────────────────────────────
+	"Operation",                # referenced by BOM Operation, Workstation
+	"Workstation",              # references Operation; referenced by BOM, Job Card
+	"Workstation Type",         # referenced by Workstation
+	"Routing",                  # references Operation/Workstation; referenced by BOM, Work Order
+	"BOM",                      # references Item, Routing; referenced by Work Order, Stock Entry
+	# ── Level 7: ERPNext project & asset masters ─────────────────────────────
+	"Project",                  # referenced by Task, Timesheet, Expense Claim, Stock Entry
+	"Project Type",             # referenced by Project
+	"Asset Maintenance Template",   # referenced by Asset Maintenance
+	# ── Level 8: ERPNext CRM pipeline ────────────────────────────────────────
+	"Lead",                     # referenced by Opportunity, Quotation
+	"Opportunity",              # references Lead; referenced by Quotation
+	# ── Level 9: ERPNext sales & purchase orders ─────────────────────────────
+	"Quotation",                # references Opportunity, Customer; referenced by Sales Order
+	"Sales Order",              # references Customer, Quotation; referenced by Delivery Note, Sales Invoice
+	"Purchase Order",           # references Supplier; referenced by Purchase Receipt, Purchase Invoice
+	"Material Request",         # referenced by Purchase Order, Stock Entry
+	"Supplier Quotation",       # references Supplier; referenced by Purchase Order
+	"Subcontracting Order",     # references Purchase Order; referenced by Subcontracting Receipt
+	# ── Level 10: ERPNext fulfillment & stock ────────────────────────────────
+	"Delivery Note",            # references Sales Order, Customer
+	"Purchase Receipt",         # references Purchase Order, Supplier
+	"Stock Entry",              # references Warehouse, Item, BOM (when type=Manufacture)
+	"Stock Reconciliation",     # references Warehouse, Item
+	"Landed Cost Voucher",      # references Purchase Receipt
+	"Subcontracting Receipt",   # references Subcontracting Order
+	"Packing Slip",             # references Delivery Note
+	# ── Level 11: ERPNext invoicing & accounting ─────────────────────────────
+	"Sales Invoice",            # references Sales Order, Customer
+	"Purchase Invoice",         # references Purchase Order, Supplier
+	"Payment Entry",            # references Bank Account, Mode of Payment
+	"Journal Entry",            # references Account, Bank Account
+	"Payment Request",          # references Sales Invoice / Purchase Invoice
+	"Dunning",                  # references Sales Invoice
+	"POS Invoice",              # references POS Profile, Customer
+	"POS Opening Entry",        # references POS Profile
+	"POS Closing Entry",        # references POS Opening Entry
+	# ── Level 12: ERPNext manufacturing production ───────────────────────────
+	"Work Order",               # references BOM, Item, Routing
+	"Job Card",                 # references Work Order, Operation, Workstation
+	"BOM Update Batch",         # references BOM
+	# ── Level 13: ERPNext asset & maintenance transactions ───────────────────
+	"Asset",                    # references Asset Category, Location, Supplier
+	"Asset Maintenance",        # references Asset, Asset Maintenance Template
+	"Asset Movement",           # references Asset, Location
+	"Asset Capitalization",     # references Asset
+	"Asset Repair",             # references Asset
+	# ── Level 14: ERPNext support, quality & projects ────────────────────────
+	"Issue",                    # references Customer
+	"Quality Inspection",       # references Item, Quality Inspection Template
+	"Task",                     # references Project
+	"Timesheet",                # references Project, Employee
+	# ── Level 15: HRMS — foundations (no HRMS-to-HRMS dependencies) ─────────
+	"Employment Type",          # referenced by Employee
+	"Employee Grade",           # referenced by Employee
+	"Skill",                    # referenced by Employee Skill, Designation Skill
+	"KRA",                      # referenced by Appraisal Goal, Appraisal Template Goal
+	"Grievance Type",           # referenced by Employee Grievance
+	"Identification Document Type",  # referenced by Employee documents
+	"Shift Type",               # referenced by Shift Assignment, Employee Checkin
+	"Leave Type",               # referenced by Leave Allocation, Leave Application, Leave Policy
+	"Leave Block List",         # referenced by Leave Type
+	"Expense Claim Type",       # referenced by Expense Claim Detail
+	"Salary Component",         # referenced by Salary Structure, Salary Detail, Additional Salary
+	"Income Tax Slab",          # referenced by Payroll Period
+	"Appraisal Template",       # referenced by Appraisal, Appraisal Cycle
+	"Interview Type",           # referenced by Interview Round
+	"Job Opening Template",     # referenced by Job Opening
+	"Job Offer Term Template",  # referenced by Job Offer Term
+	"Training Program",         # referenced by Training Event
+	"Appointment Letter Template",  # referenced by Appointment Letter
+	"Employee Feedback Criteria",   # referenced by Employee Performance Feedback
+	# ── Level 16: HRMS — secondary masters ──────────────────────────────────
+	"Leave Policy",             # references Leave Type; referenced by Leave Policy Assignment
+	"Leave Period",             # referenced by Leave Allocation, Leave Policy Assignment
+	"Payroll Period",           # references Income Tax Slab; referenced by Payroll Entry, Salary Slip
+	"Salary Structure",         # references Salary Component; referenced by Salary Structure Assignment, Salary Slip
+	"Interview Round",          # references Interview Type; referenced by Interview
+	"Appraisal Cycle",          # references Appraisal Template; referenced by Appraisal, Appraisee
+	"Staffing Plan",            # referenced by Job Requisition
+	"Shift Schedule",           # references Shift Type; referenced by Shift Schedule Assignment
+	"Employee Onboarding Template",   # referenced by Employee Onboarding
+	"Employee Separation Template",   # referenced by Employee Separation
+	# ── Level 17: HRMS — job pipeline ───────────────────────────────────────
+	"Job Opening",              # references Staffing Plan; referenced by Job Applicant, Job Requisition
+	"Job Applicant",            # references Job Opening; referenced by Interview, Job Offer
+	"Interview",                # references Job Applicant, Interview Round; referenced by Interview Feedback
+	"Interview Feedback",       # references Interview
+	"Job Offer",                # references Job Applicant; referenced by Employee Onboarding
+	# ── Level 18: HRMS — HR transactions (depend on Employee + HRMS masters) ──
+	"Attendance",               # references Employee, Shift Type
+	"Attendance Request",       # references Employee
+	"Employee Checkin",         # references Employee, Shift Type
+	"Shift Assignment",         # references Employee, Shift Type
+	"Shift Schedule Assignment",# references Employee, Shift Schedule
+	"Shift Request",            # references Employee, Shift Type
+	"Leave Allocation",         # references Employee, Leave Type, Leave Period
+	"Leave Policy Assignment",  # references Employee, Leave Policy, Leave Period
+	"Leave Application",        # references Employee, Leave Type
+	"Compensatory Leave Request","Leave Encashment",
+	"Leave Ledger Entry",
+	"Expense Claim",            # references Employee, Expense Claim Type
+	"Employee Advance",         # references Employee
+	"Travel Request",           # references Employee
+	"Employee Promotion",       # references Employee
+	"Employee Transfer",        # references Employee
+	"Employee Separation",      # references Employee, Employee Separation Template
+	"Employee Onboarding",      # references Employee, Job Offer, Employee Onboarding Template
+	"Employee Grievance",       # references Employee, Grievance Type
+	"Employee Referral",        # references Employee
+	"Employee Health Insurance","Employee Skill Map",
+	"Exit Interview",
+	# ── Level 19: HRMS — payroll transactions ───────────────────────────────
+	"Salary Structure Assignment",  # references Employee, Salary Structure
+	"Payroll Entry",            # references Payroll Period
+	"Salary Slip",              # references Employee, Salary Structure, Payroll Entry
+	"Additional Salary",        # references Employee, Salary Component
+	"Employee Incentive",       # references Employee, Salary Component
+	"Retention Bonus",          # references Employee, Salary Component
+	"Employee Benefit Application","Employee Benefit Claim",
+	"Gratuity",
+	"Salary Withholding",
+	"Full and Final Statement",
+	"Employee Tax Exemption Declaration",
+	"Employee Tax Exemption Proof Submission",
+	# ── Level 20: HRMS — appraisal & training ───────────────────────────────
+	"Appraisal",                # references Employee, Appraisal Cycle
+	"Appraisee",                # references Employee, Appraisal Cycle
+	"Employee Performance Feedback",  # references Employee, Appraisal
+	"Training Event",           # references Training Program
+	"Training Result",          # references Training Event
+	"Vehicle Log",
+	# ── Level 21: Plus Care Pharmacy — masters ──────────────────────────────
+	"Loyalty Level",    # referenced by Loyalty Program, Loyalty Reward, Customer Mission
+	"Loyalty Program",  # referenced by Loyalty Reward, Loyalty Point Entry
+	"Delivery Zone",    # referenced by Delivery Order
+	"Courier",          # referenced by Delivery Order
+	# ── Level 22: Plus Care Pharmacy — secondary masters ────────────────────
+	"Loyalty Reward",           # depends on Loyalty Program, Loyalty Level
+	"Customer Mission",         # depends on Loyalty Level
+	"Medical Prescription",     # depends on Customer, Item
+	# ── Level 23: Plus Care Pharmacy — transactional doctypes ───────────────
+	"Treatment Plan",           # depends on Customer, Medical Prescription
+	"Customer Mission Progress", # depends on Customer, Customer Mission
+	"Customer Reward",          # depends on Customer, Loyalty Reward
+	"Loyalty Point Entry",      # depends on Customer, Loyalty Program
+	"POS Shift",                # depends on POS Profile, Employee
+	"POS Wallet Transaction",   # depends on Customer
+	"Delivery Order",           # depends on Sales Order, Courier, Delivery Zone
 ]
 
 # Individual doctypes always excluded regardless of module — covers stragglers
@@ -94,7 +298,7 @@ _EXCLUDED_DOCTYPES = {
 	"Workspace", "Workspace Link", "Workspace Chart",
 	"Workspace Shortcut", "Workspace Quick List",
 	# Misc system
-	"Patch Log", "Process Subscription", "Translation",
+	"Patch Log", "Process Subscription",
 	"Number Card", "Dashboard", "Dashboard Chart",
 	"Notification", "Notification Log",
 }
@@ -143,7 +347,8 @@ class SyncEngine:
 
 		if self.settings.data_type == "Full Database":
 			# Exclude system/infrastructure modules and individual system doctypes
-			# so only actual business data is synced.
+			# so only actual business data is synced. Doctypes in _EXPLICIT_INCLUDE_DOCTYPES
+			# bypass the module filter (e.g. User and Translation are in Core module).
 			all_doctypes = frappe.get_all(
 				"DocType",
 				filters={"issingle": 0, "istable": 0},
@@ -151,8 +356,9 @@ class SyncEngine:
 			)
 			doctypes = [
 				d.name for d in all_doctypes
-				if d.module not in _SYSTEM_MODULES
+				if (d.module not in _SYSTEM_MODULES or d.name in _EXPLICIT_INCLUDE_DOCTYPES)
 				and d.name not in _EXCLUDED_DOCTYPES
+				and frappe.db.exists("DocType", d.name)
 			]
 		else:
 			# Selective modules
@@ -646,6 +852,158 @@ class SyncEngine:
 				self.log_sync_error(doctype, doctype, str(e))
 		return synced
 
+	def sync_files(self, doctypes_synced):
+		"""Sync File records (attachments + item images) for all doctypes that were synced."""
+		direction = self.settings.sync_direction
+		try:
+			if direction in ("Live to Local (One Way)", "Bidirectional (Two Way)"):
+				self._pull_files_from_remote(doctypes_synced)
+			if direction in ("Local to Live (One Way)", "Bidirectional (Two Way)"):
+				self._push_files_to_remote(doctypes_synced)
+		except Exception as e:
+			self.log_sync_error("File", None, str(e))
+
+	def _pull_files_from_remote(self, doctypes_synced):
+		"""Download File records and binary content from remote for synced doctypes."""
+		try:
+			endpoint = f"{self.remote_url}/api/resource/File"
+			batch_size = int(self.settings.batch_size or 50)
+			target_doctypes = list(set(doctypes_synced) | {"Item"})
+
+			filters = [["attached_to_doctype", "in", target_doctypes]]
+			if self.settings.last_sync_time:
+				filters.append(["modified", ">", str(self.settings.last_sync_time)])
+
+			start = 0
+			while True:
+				params = {
+					"fields": '["name","file_name","file_url","attached_to_doctype","attached_to_name","is_private","modified"]',
+					"limit_page_length": batch_size,
+					"limit_start": start,
+					"filters": json.dumps(filters),
+				}
+				response = requests.get(endpoint, params=params, headers=self.get_headers(), timeout=30)
+				if response.status_code != 200:
+					break
+				records = response.json().get("data", [])
+				if not records:
+					break
+				for file_record in records:
+					try:
+						self._save_remote_file_locally(file_record)
+					except Exception as e:
+						self.log_sync_error("File", file_record.get("name"), str(e))
+				if len(records) < batch_size:
+					break
+				start += batch_size
+		except Exception as e:
+			self.log_sync_error("File", None, f"Pull files failed: {str(e)}")
+
+	def _save_remote_file_locally(self, file_record):
+		"""Download one remote file and save it as a local File document."""
+		file_url = file_record.get("file_url", "")
+		file_name = file_record.get("file_name", "")
+		if not file_url or not file_name:
+			return
+
+		# Skip if a matching local file already exists
+		existing = frappe.db.get_value("File", {
+			"file_name": file_name,
+			"attached_to_doctype": file_record.get("attached_to_doctype"),
+			"attached_to_name": file_record.get("attached_to_name"),
+		}, "name")
+		if existing:
+			return
+
+		download_url = (
+			self.remote_url.rstrip("/") + file_url
+			if file_url.startswith("/")
+			else file_url
+		)
+
+		resp = requests.get(download_url, headers=self.get_headers(), timeout=60)
+		if resp.status_code != 200:
+			return
+
+		file_doc = frappe.get_doc({
+			"doctype": "File",
+			"file_name": file_name,
+			"attached_to_doctype": file_record.get("attached_to_doctype", ""),
+			"attached_to_name": file_record.get("attached_to_name", ""),
+			"is_private": int(file_record.get("is_private", 0)),
+			"content": resp.content,
+		})
+		file_doc.insert(ignore_permissions=True)
+		frappe.db.commit()
+
+	def _push_files_to_remote(self, doctypes_synced):
+		"""Upload local File records and binary content to remote for synced doctypes."""
+		try:
+			target_doctypes = list(set(doctypes_synced) | {"Item"})
+			batch_size = int(self.settings.batch_size or 50)
+			filters = {"attached_to_doctype": ["in", target_doctypes]}
+			if self.settings.last_sync_time:
+				filters["modified"] = [">", self.settings.last_sync_time]
+
+			start = 0
+			while True:
+				file_records = frappe.get_all(
+					"File",
+					filters=filters,
+					fields=["name", "file_name", "file_url", "attached_to_doctype",
+							"attached_to_name", "is_private"],
+					limit_page_length=batch_size,
+					limit_start=start,
+				)
+				if not file_records:
+					break
+				for file_record in file_records:
+					try:
+						self._upload_file_to_remote(file_record)
+					except Exception as e:
+						self.log_sync_error("File", file_record.get("name"), str(e))
+				if len(file_records) < batch_size:
+					break
+				start += batch_size
+		except Exception as e:
+			self.log_sync_error("File", None, f"Push files failed: {str(e)}")
+
+	def _upload_file_to_remote(self, file_record):
+		"""Upload one local file to the remote Frappe server."""
+		file_url = file_record.get("file_url", "")
+		if not file_url:
+			return
+
+		site_path = frappe.get_site_path()
+		if file_url.startswith("/files/"):
+			file_path = os.path.join(site_path, "public", file_url.lstrip("/"))
+		elif file_url.startswith("/private/files/"):
+			file_path = os.path.join(site_path, file_url.lstrip("/"))
+		else:
+			return
+
+		if not os.path.exists(file_path):
+			return
+
+		with open(file_path, "rb") as f:
+			file_content = f.read()
+
+		upload_url = f"{self.remote_url.rstrip('/')}/api/method/upload_file"
+		headers = {"Authorization": f"token {self.api_key}:{self.api_secret}"}
+		response = requests.post(
+			upload_url,
+			files={"file": (file_record.get("file_name"), file_content)},
+			data={
+				"is_private": str(int(file_record.get("is_private", 0))),
+				"attached_to_doctype": file_record.get("attached_to_doctype", ""),
+				"attached_to_name": file_record.get("attached_to_name", ""),
+			},
+			headers=headers,
+			timeout=60,
+		)
+		if response.status_code not in [200, 201]:
+			raise Exception(f"Upload failed: {response.text[:200]}")
+
 	def log_sync_error(self, doctype, docname, error):
 		"""Log sync errors"""
 		try:
@@ -746,6 +1104,22 @@ def execute_sync():
 
 			except Exception as e:
 				engine.log_sync_error(doctype, None, str(e))
+
+		# Sync attachments and item images after all document doctypes are done
+		if settings.data_type == "Full Database":
+			try:
+				engine.sync_files(doctypes)
+				sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
+				frappe.get_doc({
+					"doctype": "Sync Log",
+					"sync_type": sync_type,
+					"doctype_name": "File",
+					"status": "Success",
+					"sync_details": "Attachments and item images synced"
+				}).insert(ignore_permissions=True)
+				frappe.db.commit()
+			except Exception as e:
+				engine.log_sync_error("File", None, str(e))
 
 		# Update sync status
 		frappe.db.set_value("Sync Settings", "Sync Settings", {
