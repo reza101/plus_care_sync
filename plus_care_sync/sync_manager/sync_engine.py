@@ -783,12 +783,17 @@ class SyncEngine:
 
 					if should_update:
 						local_doc.update(remote_data)
+						local_doc.flags.ignore_mandatory = True
+						local_doc.flags.ignore_validate = True
 						local_doc.save(ignore_permissions=True)
 						frappe.db.commit()
 				else:
 					remote_data["doctype"] = doctype
 					doc = frappe.get_doc(remote_data)
-					doc.insert(ignore_permissions=True)
+					doc.flags.ignore_permissions = True
+					doc.flags.ignore_mandatory = True
+					doc.flags.ignore_validate = True
+					doc.insert()
 					frappe.db.commit()
 
 		except Exception as e:
