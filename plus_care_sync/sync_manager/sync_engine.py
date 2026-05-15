@@ -568,6 +568,12 @@ class SyncEngine:
 			# FIX 1: Skip records we already pushed this session (loop prevention)
 			pushed = self._pushed_this_session.get(doctype, set())
 
+			# Frappe's list API omits child table rows entirely. For doctypes that
+			# have child tables (e.g. Mode of Payment → accounts, POS Profile →
+			# payments) we must fetch each document individually so that child rows
+			# are included in the payload.
+			has_child_tables = any(f.fieldtype == "Table" for f in meta.fields)
+
 			synced_count = 0
 			needs_tree_rebuild = None
 			found_any = False
@@ -577,6 +583,15 @@ class SyncEngine:
 				if record.get("name") in pushed:
 					continue  # We just pushed this — don't pull it back
 				try:
+					if has_child_tables:
+						encoded_name = quote(record["name"])
+						doc_resp = requests.get(
+							f"{self.remote_url}/api/resource/{encoded_doctype}/{encoded_name}",
+							headers=self.get_headers(),
+							timeout=30
+						)
+						if doc_resp.status_code == 200:
+							record = doc_resp.json().get("data", record)
 					if self.use_queue:
 						self.add_to_queue(doctype, record, "Incoming (Live → Local)")
 					else:
