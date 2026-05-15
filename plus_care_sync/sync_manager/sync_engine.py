@@ -978,6 +978,7 @@ class SyncEngine:
 			"is_private": int(file_record.get("is_private", 0)),
 			"content": resp.content,
 		})
+		file_doc.flags.ignore_links = True
 		file_doc.insert(ignore_permissions=True)
 		frappe.db.commit()
 
@@ -1028,6 +1029,24 @@ class SyncEngine:
 			return
 
 		if not os.path.exists(file_path):
+			return
+
+		# Skip if the remote already has a file with this name attached to the same doc
+		check_resp = requests.get(
+			f"{self.remote_url.rstrip('/')}/api/resource/File",
+			params={
+				"filters": json.dumps([
+					["file_name", "=", file_record.get("file_name")],
+					["attached_to_doctype", "=", file_record.get("attached_to_doctype", "")],
+					["attached_to_name", "=", file_record.get("attached_to_name", "")],
+				]),
+				"fields": '["name"]',
+				"limit_page_length": 1,
+			},
+			headers=self.get_headers(),
+			timeout=30,
+		)
+		if check_resp.status_code == 200 and check_resp.json().get("data"):
 			return
 
 		with open(file_path, "rb") as f:
@@ -1151,20 +1170,19 @@ def execute_sync():
 				engine.log_sync_error(doctype, None, str(e))
 
 		# Sync attachments and item images after all document doctypes are done
-		if settings.data_type == "Full Database":
-			try:
-				engine.sync_files(doctypes)
-				sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
-				frappe.get_doc({
-					"doctype": "Sync Log",
-					"sync_type": sync_type,
-					"doctype_name": "File",
-					"status": "Success",
-					"sync_details": "Attachments and item images synced"
-				}).insert(ignore_permissions=True)
-				frappe.db.commit()
-			except Exception as e:
-				engine.log_sync_error("File", None, str(e))
+		try:
+			engine.sync_files(doctypes)
+			sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
+			frappe.get_doc({
+				"doctype": "Sync Log",
+				"sync_type": sync_type,
+				"doctype_name": "File",
+				"status": "Success",
+				"sync_details": "Attachments and item images synced"
+			}).insert(ignore_permissions=True)
+			frappe.db.commit()
+		except Exception as e:
+			engine.log_sync_error("File", None, str(e))
 
 		# Update sync status
 		frappe.db.set_value("Sync Settings", "Sync Settings", {
