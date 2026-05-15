@@ -711,7 +711,7 @@ class SyncEngine:
 		"""Return a copy of data containing only fields that exist in the local doctype meta.
 
 		Prevents "Unknown field" errors when the remote server has custom fields or a
-		newer schema that hasn't been applied locally yet.
+		newer schema that hasn't been applied locally yet. Recurses into child table rows.
 		"""
 		meta = frappe.get_meta(doctype)
 		known_fields = {f.fieldname for f in meta.fields}
@@ -722,7 +722,20 @@ class SyncEngine:
 			"parentfield",
 		}
 		allowed = known_fields | system_fields
-		return {k: v for k, v in data.items() if k in allowed}
+		cleaned = {k: v for k, v in data.items() if k in allowed}
+
+		# Strip unknown fields from child table rows too — the remote may have
+		# custom or newer fields in child doctypes that don't exist locally.
+		for field in meta.fields:
+			if field.fieldtype == "Table" and field.fieldname in cleaned:
+				child_doctype = field.options
+				cleaned[field.fieldname] = [
+					self._strip_unknown_fields(child_doctype, row)
+					for row in (cleaned[field.fieldname] or [])
+					if isinstance(row, dict)
+				]
+
+		return cleaned
 
 	def update_local_record(self, doctype, remote_data, skip_rebuild=False):
 		"""Update local record with remote data.
