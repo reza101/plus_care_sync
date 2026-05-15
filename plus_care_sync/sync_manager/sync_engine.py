@@ -745,6 +745,16 @@ class SyncEngine:
 			parent_field = f"parent_{frappe.scrub(doctype)}" if is_tree else None
 			name = remote_data.get("name")
 
+			# Some doctypes declare is_tree=1 (e.g. Employee) but the actual DB
+			# table was never migrated with NestedSet columns (lft, rgt, parent_*).
+			# Verify the column exists before taking the tree code path; if not,
+			# fall back to the standard document save.
+			if is_tree and parent_field:
+				db_cols = {row[0] for row in frappe.db.sql(f"SHOW COLUMNS FROM `tab{doctype}`")}
+				if parent_field not in db_cols:
+					is_tree = False
+					parent_field = None
+
 			if is_tree and parent_field:
 				# Determine if we should update based on conflict resolution
 				should_update = True
