@@ -812,8 +812,26 @@ class SyncEngine:
 						doc.flags.ignore_mandatory = True
 						doc.flags.ignore_validate = True
 						doc.flags.ignore_links = True
-						doc.insert()
-						frappe.db.commit()
+						try:
+							doc.insert()
+							frappe.db.commit()
+						except Exception as insert_err:
+							if "1062" in str(insert_err) or "Duplicate entry" in str(insert_err):
+								# autoname transformed the remote name (e.g. "Sales") into a
+								# name that already exists locally (e.g. "Sales - PCPM").
+								# Update the existing local record with the remote fields.
+								actual_name = getattr(doc, "name", name)
+								if frappe.db.exists(doctype, actual_name):
+									update_fields = {k: v for k, v in remote_data.items()
+										if k not in ("name", "doctype")}
+									if update_fields:
+										frappe.db.set_value(doctype, actual_name,
+											update_fields, update_modified=False)
+									frappe.db.commit()
+								else:
+									raise
+							else:
+								raise
 
 					if skip_rebuild:
 						return (doctype, parent_field)
