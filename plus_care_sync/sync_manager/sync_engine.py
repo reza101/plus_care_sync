@@ -1044,17 +1044,14 @@ class SyncEngine:
 		if not file_url:
 			return
 
-		if not file_url.startswith("/"):
-			# External URL — store the URL reference without downloading
-			base["file_url"] = file_url
-			file_doc = frappe.get_doc(base)
-			file_doc.flags.ignore_links = True
-			file_doc.insert(ignore_permissions=True)
-			frappe.db.commit()
-			return
+		# Build full download URL: prepend remote origin for server-relative paths,
+		# use as-is for absolute external URLs (http/https).
+		download_url = (
+			self.remote_url.rstrip("/") + file_url
+			if file_url.startswith("/")
+			else file_url
+		)
 
-		# Frappe-hosted file — download binary content from remote
-		download_url = self.remote_url.rstrip("/") + file_url
 		resp = requests.get(download_url, headers=self.get_headers(), timeout=60)
 		if resp.status_code != 200:
 			return
