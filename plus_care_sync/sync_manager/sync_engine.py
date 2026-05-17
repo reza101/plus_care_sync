@@ -969,24 +969,26 @@ class SyncEngine:
 			self.log_sync_error("File", None, str(e))
 
 	def _pull_files_from_remote(self, doctypes_synced):
-		"""Download File records and binary content from remote for synced doctypes."""
+		"""Download all File records from remote (attachments, standalone, folders)."""
 		try:
 			endpoint = f"{self.remote_url}/api/resource/File"
 			batch_size = int(self.settings.batch_size or 50)
-			target_doctypes = list(set(doctypes_synced) | {"Item"})
 
-			filters = [["attached_to_doctype", "in", target_doctypes]]
+			# No attached_to_doctype filter — pull every File record so standalone
+			# files, folders, and externally-linked files all land locally.
+			filters = []
 			if self.settings.last_sync_time:
 				filters.append(["modified", ">", str(self.settings.last_sync_time)])
 
 			start = 0
 			while True:
 				params = {
-					"fields": '["name","file_name","file_url","attached_to_doctype","attached_to_name","is_private","modified"]',
+					"fields": '["name","file_name","file_url","attached_to_doctype","attached_to_name","is_private","is_folder","modified"]',
 					"limit_page_length": batch_size,
 					"limit_start": start,
-					"filters": json.dumps(filters),
 				}
+				if filters:
+					params["filters"] = json.dumps(filters)
 				response = requests.get(endpoint, params=params, headers=self.get_headers(), timeout=30)
 				if response.status_code != 200:
 					break
@@ -1005,49 +1007,71 @@ class SyncEngine:
 			self.log_sync_error("File", None, f"Pull files failed: {str(e)}")
 
 	def _save_remote_file_locally(self, file_record):
-		"""Download one remote file and save it as a local File document."""
-		file_url = file_record.get("file_url", "")
+		"""Save one remote File record locally — handles folders, external URLs, and stored files."""
 		file_name = file_record.get("file_name", "")
-		if not file_url or not file_name:
+		file_url = file_record.get("file_url", "")
+		is_folder = int(file_record.get("is_folder") or 0)
+
+		if not file_name:
 			return
 
-		# Skip if a matching local file already exists
+		# Skip if a matching local record already exists
 		existing = frappe.db.get_value("File", {
 			"file_name": file_name,
-			"attached_to_doctype": file_record.get("attached_to_doctype"),
-			"attached_to_name": file_record.get("attached_to_name"),
+			"attached_to_doctype": file_record.get("attached_to_doctype") or "",
+			"attached_to_name": file_record.get("attached_to_name") or "",
 		}, "name")
 		if existing:
 			return
 
-		download_url = (
-			self.remote_url.rstrip("/") + file_url
-			if file_url.startswith("/")
-			else file_url
-		)
+		base = {
+			"doctype": "File",
+			"file_name": file_name,
+			"attached_to_doctype": file_record.get("attached_to_doctype") or "",
+			"attached_to_name": file_record.get("attached_to_name") or "",
+			"is_private": int(file_record.get("is_private") or 0),
+			"is_folder": is_folder,
+		}
 
+		if is_folder:
+			# Folder record — no binary content
+			file_doc = frappe.get_doc(base)
+			file_doc.flags.ignore_links = True
+			file_doc.insert(ignore_permissions=True)
+			frappe.db.commit()
+			return
+
+		if not file_url:
+			return
+
+		if not file_url.startswith("/"):
+			# External URL — store the URL reference without downloading
+			base["file_url"] = file_url
+			file_doc = frappe.get_doc(base)
+			file_doc.flags.ignore_links = True
+			file_doc.insert(ignore_permissions=True)
+			frappe.db.commit()
+			return
+
+		# Frappe-hosted file — download binary content from remote
+		download_url = self.remote_url.rstrip("/") + file_url
 		resp = requests.get(download_url, headers=self.get_headers(), timeout=60)
 		if resp.status_code != 200:
 			return
 
-		file_doc = frappe.get_doc({
-			"doctype": "File",
-			"file_name": file_name,
-			"attached_to_doctype": file_record.get("attached_to_doctype", ""),
-			"attached_to_name": file_record.get("attached_to_name", ""),
-			"is_private": int(file_record.get("is_private", 0)),
-			"content": resp.content,
-		})
+		base["content"] = resp.content
+		file_doc = frappe.get_doc(base)
 		file_doc.flags.ignore_links = True
 		file_doc.insert(ignore_permissions=True)
 		frappe.db.commit()
 
 	def _push_files_to_remote(self, doctypes_synced):
-		"""Upload local File records and binary content to remote for synced doctypes."""
+		"""Upload all local File records and binary content to remote."""
 		try:
-			target_doctypes = list(set(doctypes_synced) | {"Item"})
 			batch_size = int(self.settings.batch_size or 50)
-			filters = {"attached_to_doctype": ["in", target_doctypes]}
+			# No attached_to_doctype filter — push every local file including
+			# standalone files and folders so the remote File Manager stays in sync.
+			filters = {"is_folder": 0}
 			if self.settings.last_sync_time:
 				filters["modified"] = [">", self.settings.last_sync_time]
 
