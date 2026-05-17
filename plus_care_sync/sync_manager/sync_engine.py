@@ -1033,7 +1033,13 @@ class SyncEngine:
 		if not file_name:
 			return
 
-		# Skip if a matching local record already exists
+		# Skip if the record already exists locally — check by primary key first
+		# (covers folders like "Home/Attachments" that always exist in every site),
+		# then fall back to a file_name + context match for files without a fixed name.
+		remote_name = file_record.get("name", "")
+		if remote_name and frappe.db.exists("File", remote_name):
+			return
+
 		existing = frappe.db.get_value("File", {
 			"file_name": file_name,
 			"attached_to_doctype": file_record.get("attached_to_doctype") or "",
