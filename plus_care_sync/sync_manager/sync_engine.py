@@ -1192,6 +1192,9 @@ def execute_sync():
 		if not settings.enable_sync:
 			return {"status": "error", "message": "Sync is not enabled"}
 
+		if settings.sync_status == "Syncing":
+			return {"status": "error", "message": "Sync already in progress"}
+
 		# Update status
 		frappe.db.set_value("Sync Settings", "Sync Settings", "sync_status", "Syncing")
 		frappe.db.commit()
