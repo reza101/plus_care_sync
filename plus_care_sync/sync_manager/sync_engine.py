@@ -156,6 +156,8 @@ _SYNC_PRIORITY = [
 	"Material Request",         # referenced by Purchase Order, Stock Entry
 	"Supplier Quotation",       # references Supplier; referenced by Purchase Order
 	"Subcontracting Order",     # references Purchase Order; referenced by Subcontracting Receipt
+	# ── Level 9.5: Serial/Batch tracking — must precede all stock transactions ──
+	"Serial and Batch Bundle",  # referenced by Stock Entry, Stock Reconciliation, SLE, invoices
 	# ── Level 10: ERPNext fulfillment & stock ────────────────────────────────
 	"Delivery Note",            # references Sales Order, Customer
 	"Purchase Receipt",         # references Purchase Order, Supplier
@@ -298,6 +300,8 @@ _EXCLUDED_DOCTYPES = {
 	"Version", "Access Log", "Route History", "Error Log",
 	"Error Snapshot", "Scheduled Job Log", "Activity Log",
 	"Deleted Document", "Log Settings", "Background Job Log",
+	# Asset activity log — too many rows, times out during full sync
+	"Asset Activity",
 	# Schema / meta
 	"DocType", "DocField", "DocPerm", "Custom DocPerm",
 	"Property Setter", "Custom Field", "Client Script",
@@ -313,6 +317,8 @@ _EXCLUDED_DOCTYPES = {
 	"Patch Log", "Process Subscription",
 	"Number Card", "Dashboard", "Dashboard Chart",
 	"Notification", "Notification Log",
+	# Stock engine internals — managed automatically, must not be synced directly
+	"Bin",                  # recalculated by stock engine on every transaction
 }
 
 
@@ -818,39 +824,80 @@ class SyncEngine:
 
 			else:
 				if frappe.db.exists(doctype, name):
-					local_doc = frappe.get_doc(doctype, name)
-
 					should_update = False
 					if self.settings.conflict_resolution == "Live Server Wins":
 						should_update = True
 					elif self.settings.conflict_resolution == "Latest Timestamp Wins":
 						remote_modified = remote_data.get("modified")
+						local_modified = frappe.db.get_value(doctype, name, "modified")
 						r_dt = _parse_dt(remote_modified)
-						l_dt = _parse_dt(local_doc.modified)
+						l_dt = _parse_dt(local_modified)
 						if r_dt and l_dt and r_dt > l_dt:
 							should_update = True
-					# FIX 3: "Local Server Wins" or unrecognized value — keep local, skip update
-					# (should_update stays False — explicit, not a silent accident)
+					# "Local Server Wins" or unrecognized — keep local, skip update
 
 					if should_update:
-						local_doc.update(remote_data)
-						local_doc.flags.ignore_mandatory = True
-						local_doc.flags.ignore_validate = True
-						local_doc.flags.ignore_links = True
-						local_doc.save(ignore_permissions=True)
-						frappe.db.commit()
+						self._write_doc_directly(doctype, name, remote_data, is_new=False)
 				else:
-					remote_data["doctype"] = doctype
-					doc = frappe.get_doc(remote_data)
-					doc.flags.ignore_permissions = True
-					doc.flags.ignore_mandatory = True
-					doc.flags.ignore_validate = True
-					doc.flags.ignore_links = True
-					doc.insert()
-					frappe.db.commit()
+					self._write_doc_directly(doctype, name, remote_data, is_new=True)
 
 		except Exception as e:
 			raise Exception(f"Failed to update local record: {str(e)}")
+
+	def _write_doc_directly(self, doctype, name, data, is_new):
+		"""Write a document via raw DB operations, bypassing all Frappe hooks and validation.
+
+		This avoids controller-level errors (mandatory fields, link checks, docstatus
+		restrictions, stale-document conflicts) that prevent normal save/insert from
+		working in a data-replication context.
+		"""
+		meta = frappe.get_meta(doctype)
+		table_fields = {f.fieldname: f.options for f in meta.fields if f.fieldtype == "Table"}
+
+		data = dict(data)
+		# Pull child table rows out so they are handled separately
+		child_data = {fn: (data.pop(fn, None) or []) for fn in table_fields}
+
+		if is_new:
+			data.setdefault("doctype", doctype)
+			doc = frappe.get_doc(data)
+			doc.flags.ignore_permissions = True
+			doc.flags.ignore_mandatory = True
+			doc.flags.ignore_validate = True
+			doc.flags.ignore_links = True
+			doc.db_insert()
+		else:
+			top_fields = {k: v for k, v in data.items() if k not in ("name", "doctype")}
+			if top_fields:
+				frappe.db.set_value(doctype, name, top_fields, update_modified=False)
+
+		# Replace child table rows via direct SQL
+		for fieldname, child_doctype in table_fields.items():
+			rows = child_data.get(fieldname) or []
+			frappe.db.delete(child_doctype, {
+				"parent": name,
+				"parenttype": doctype,
+				"parentfield": fieldname,
+			})
+			for idx, row in enumerate(rows, 1):
+				row = dict(row)
+				row.update({
+					"parent": name,
+					"parenttype": doctype,
+					"parentfield": fieldname,
+					"idx": idx,
+					"doctype": child_doctype,
+				})
+				if not row.get("name"):
+					row["name"] = frappe.generate_hash(length=10)
+				child_doc = frappe.get_doc(row)
+				child_doc.flags.ignore_permissions = True
+				child_doc.flags.ignore_mandatory = True
+				child_doc.flags.ignore_validate = True
+				child_doc.flags.ignore_links = True
+				child_doc.db_insert()
+
+		frappe.db.commit()
 
 	def push_single_to_remote(self, doctype):
 		"""Push a Single doctype to the remote server."""
