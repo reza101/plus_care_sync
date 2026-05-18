@@ -34,39 +34,28 @@ _EXPLICIT_INCLUDE_DOCTYPES = {
 	"Country",
 	# Core module — optional language field on Customer, Supplier, Lead, Print Format
 	"Language",
+	# Desk module — stores per-user UI preferences (column configs, list settings)
+	"DocType User Settings",
 }
 
-# Single doctypes that hold ERP configuration. Excluded by the normal issingle=0
-# filter so handled separately via sync_erp_settings().
-_SINGLE_SETTINGS_DOCTYPES = [
-	# Frappe core
-	"Print Settings",
-	# ERPNext — Accounts
-	"Accounts Settings",
-	"Subscription Settings",
-	"Currency Exchange Settings",
-	# ERPNext — Stock
-	"Stock Settings",
-	"Delivery Settings",
-	"Item Variant Settings",
-	"Stock Reposting Settings",
-	# ERPNext — Buying / Selling
-	"Buying Settings",
-	"Selling Settings",
-	# ERPNext — Setup
-	"Global Defaults",
-	# ERPNext — Manufacturing
-	"Manufacturing Settings",
-	# ERPNext — CRM / Projects / Support
-	"CRM Settings",
-	"Projects Settings",
-	"Support Settings",
-	# ERPNext — POS
-	"POS Settings",
-	# HRMS
-	"HR Settings",
-	"Payroll Settings",
-]
+# Single doctypes that must never be synced — our own app internals and
+# pure system records that have no meaning on another site.
+_SINGLE_SYNC_EXCLUDE = {
+	"Sync Settings",          # this app's own config
+	"Installation",           # site-specific install record
+	"Patch Log",              # site-specific migration history
+	"System Settings",        # site-specific (hostname, timezone, mail)
+	"Website Settings",       # site-specific domain/branding
+	"Blogger",                # site-specific blog identity
+	"Portal Settings",        # site-specific portal config
+	"Social Login Key",       # site-specific OAuth keys
+	"OAuth Settings",         # site-specific OAuth
+	"LDAP Settings",          # site-specific LDAP
+	"Domain Settings",        # site-specific domains
+	"Energy Point Settings",  # gamification, site-specific
+	"Prepared Report",        # cached report output, site-specific
+	"Webhook Request Log",    # request audit log, site-specific
+}
 
 # Sync order matters: foundational doctypes must arrive before the records that
 # reference them.  Company is most critical — its abbr rename cascades to
@@ -959,13 +948,15 @@ class SyncEngine:
 			raise Exception(f"Failed to pull single doctype {doctype} from remote: {str(e)}")
 
 	def sync_erp_settings(self):
-		"""Sync all Single/Settings doctypes. Returns count of successful syncs."""
+		"""Sync all Single doctypes (settings, defaults, etc.). Returns count of successful syncs."""
+		all_singles = frappe.get_all("DocType", filters={"issingle": 1}, fields=["name"])
+		direction = self.settings.sync_direction
 		synced = 0
-		for doctype in _SINGLE_SETTINGS_DOCTYPES:
+		for d in all_singles:
+			doctype = d.name
+			if doctype in _SINGLE_SYNC_EXCLUDE:
+				continue
 			try:
-				if not frappe.db.exists("DocType", doctype):
-					continue
-				direction = self.settings.sync_direction
 				if direction in ("Local to Live (One Way)", "Bidirectional (Two Way)"):
 					self.push_single_to_remote(doctype)
 				if direction in ("Live to Local (One Way)", "Bidirectional (Two Way)"):
