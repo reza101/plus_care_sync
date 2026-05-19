@@ -279,6 +279,23 @@ _SYNC_PRIORITY = [
 	"Delivery Order",           # depends on Sales Order, Courier, Delivery Zone
 ]
 
+# Config/schema doctypes that must always be pulled from live in Full Database
+# mode regardless of the sync direction setting.  These hold configuration that
+# should mirror live exactly (naming series, custom fields, scripts, layouts).
+_ALWAYS_PULL_FROM_LIVE = {
+	"Property Setter",
+	"Custom Field",
+	"Client Script",
+	"Server Script",
+	"Scheduled Job Type",
+	"DocType User Settings",
+	"Translation",
+	"Notification",
+	"Workspace", "Workspace Link", "Workspace Chart",
+	"Workspace Shortcut", "Workspace Quick List",
+	"Dashboard", "Dashboard Chart", "Number Card",
+}
+
 # Individual doctypes always excluded regardless of module — covers stragglers
 # from modules that are partly business (e.g. Email, Workflow) and our own
 # app internals that must never be pushed/pulled.
@@ -1253,6 +1270,8 @@ def execute_sync():
 		for doctype in doctypes:
 			try:
 				sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
+				is_full = settings.data_type == "Full Database"
+				force_pull = is_full and doctype in _ALWAYS_PULL_FROM_LIVE
 
 				if settings.sync_direction == "Local to Live (One Way)":
 					pushed = engine.sync_doctype(doctype)
@@ -1264,6 +1283,19 @@ def execute_sync():
 						"status": "Success",
 						"records_synced": pushed
 					}).insert(ignore_permissions=True)
+
+					# Config doctypes always pulled from live even in Local→Live mode
+					if force_pull:
+						pulled = engine.pull_from_remote(doctype)
+						total_synced += pulled
+						frappe.get_doc({
+							"doctype": "Sync Log",
+							"sync_type": sync_type,
+							"doctype_name": doctype,
+							"status": "Success",
+							"records_synced": pulled,
+							"sync_details": "Config: always pulled from live"
+						}).insert(ignore_permissions=True)
 
 				elif settings.sync_direction == "Live to Local (One Way)":
 					pulled = engine.pull_from_remote(doctype)
