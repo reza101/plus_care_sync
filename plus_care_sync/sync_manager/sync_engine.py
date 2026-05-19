@@ -959,6 +959,37 @@ class SyncEngine:
 				self.log_sync_error(doctype, doctype, str(e))
 		return synced
 
+	def sync_naming_series(self):
+		"""Pull tabSeries counters from the remote server and apply locally.
+
+		Only runs in Live→Local or Bidirectional direction so local counters
+		never overwrite the live server's authoritative sequence numbers.
+		"""
+		direction = self.settings.sync_direction
+		if direction not in ("Live to Local (One Way)", "Bidirectional (Two Way)"):
+			return 0
+		try:
+			endpoint = f"{self.remote_url}/api/method/plus_care_sync.sync_manager.sync_engine.get_series_data"
+			response = requests.get(endpoint, headers=self.get_headers(), timeout=30)
+			if response.status_code != 200:
+				raise Exception(f"HTTP {response.status_code}: {response.text[:200]}")
+			rows = response.json().get("message", [])
+			for row in rows:
+				name = row.get("name")
+				current = row.get("current")
+				if not name:
+					continue
+				exists = frappe.db.sql("SELECT name FROM `tabSeries` WHERE name = %s", name)
+				if exists:
+					frappe.db.sql("UPDATE `tabSeries` SET current = %s WHERE name = %s", (current, name))
+				else:
+					frappe.db.sql("INSERT INTO `tabSeries` (name, current) VALUES (%s, %s)", (name, current))
+			frappe.db.commit()
+			return len(rows)
+		except Exception as e:
+			self.log_sync_error("tabSeries", None, str(e))
+			return 0
+
 	def sync_files(self, doctypes_synced):
 		"""Sync File records (attachments + item images) for all doctypes that were synced."""
 		direction = self.settings.sync_direction
@@ -1287,6 +1318,23 @@ def execute_sync():
 		except Exception as e:
 			engine.log_sync_error("File", None, str(e))
 
+		# Sync naming series counters (tabSeries) — live → local only
+		try:
+			series_count = engine.sync_naming_series()
+			if series_count:
+				sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
+				frappe.get_doc({
+					"doctype": "Sync Log",
+					"sync_type": sync_type,
+					"doctype_name": "tabSeries",
+					"status": "Success",
+					"records_synced": series_count,
+					"sync_details": "Naming series counters synced from live"
+				}).insert(ignore_permissions=True)
+				frappe.db.commit()
+		except Exception as e:
+			engine.log_sync_error("tabSeries", None, str(e))
+
 		# Update sync status
 		frappe.db.set_value("Sync Settings", "Sync Settings", {
 			"sync_status": "Success",
@@ -1320,6 +1368,12 @@ def execute_sync():
 		frappe.db.commit()
 		frappe.log_error(f"Sync failed: {str(e)}", "Plus Care Sync Error")
 		return {"status": "error", "message": str(e)}
+
+
+@frappe.whitelist()
+def get_series_data():
+	"""Return all naming series counters from tabSeries. Called by the sync engine on the local side."""
+	return frappe.db.sql("SELECT name, current FROM `tabSeries`", as_dict=True)
 
 
 @frappe.whitelist()
