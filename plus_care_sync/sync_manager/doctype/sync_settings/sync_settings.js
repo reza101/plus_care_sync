@@ -153,8 +153,9 @@ frappe.ui.form.on('Sync Settings', {
 
 	reset_last_sync_time: function(frm) {
 		frappe.confirm(
-			__('Clear Last Sync Time? The next sync will pull all records from scratch (full re-sync).'),
+			__('Clear Last Sync Time? This will reset any stuck sync status and immediately start a full re-sync from scratch.'),
 			function() {
+				frappe.show_alert({message: __('Resetting and starting full sync...'), indicator: 'blue'});
 				frappe.call({
 					method: 'reset_last_sync_time',
 					doc: frm.doc,

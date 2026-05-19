@@ -97,12 +97,25 @@ class SyncSettings(Document):
 
 	@frappe.whitelist()
 	def reset_last_sync_time(self):
-		"""Clear last sync time to force a full re-sync on next run"""
-		frappe.db.set_value("Sync Settings", "Sync Settings", "last_sync_time", None)
+		"""Clear last sync time and any stuck Syncing status, then trigger a full re-sync."""
+		frappe.db.set_value("Sync Settings", "Sync Settings", {
+			"last_sync_time": None,
+			"sync_status": "Idle",
+		})
 		frappe.db.commit()
 		self.last_sync_time = None
+		self.sync_status = "Idle"
+
+		# Start full sync immediately after reset
+		frappe.enqueue(
+			"plus_care_sync.sync_manager.sync_engine.execute_sync",
+			queue="long",
+			timeout=3600,
+			is_async=True,
+		)
+
 		frappe.msgprint(
-			_("Last Sync Time cleared. Next sync will pull all records from scratch."),
+			_("Sync time cleared. Full re-sync started in background."),
 			indicator="blue",
 			alert=True
 		)
