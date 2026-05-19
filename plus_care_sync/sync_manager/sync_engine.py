@@ -285,29 +285,22 @@ _SYNC_PRIORITY = [
 _EXCLUDED_DOCTYPES = {
 	# This app's own internals
 	"Sync Log", "Sync Queue", "Sync Settings", "Sync DocType",
-	# Audit / system logs
+	# Audit / system logs — site-specific noise, never sync
 	"Version", "Access Log", "Route History", "Error Log",
 	"Error Snapshot", "Scheduled Job Log", "Activity Log",
 	"Deleted Document", "Log Settings", "Background Job Log",
-	# Asset activity log — too many rows, times out during full sync
-	"Asset Activity",
-	# Schema / meta
+	"Asset Activity", "Notification Log",
+	# Core schema — syncing these would overwrite the local schema
 	"DocType", "DocField", "DocPerm", "Custom DocPerm",
-	"Property Setter", "Custom Field", "Client Script",
-	"Server Script", "DocType Action", "DocType Link", "DocType State",
-	# Job queue
-	"RQ Job", "RQ Worker", "Scheduled Job Type",
-	# Web / onboarding UI
-	"Form Tour", "Onboarding Step", "Onboarding Permission",
-	"Module Onboarding", "Web Template", "Web Template Field",
-	"Workspace", "Workspace Link", "Workspace Chart",
-	"Workspace Shortcut", "Workspace Quick List",
-	# Misc system
+	"DocType Action", "DocType Link", "DocType State",
+	# Job queue runtime — site-specific
+	"RQ Job", "RQ Worker",
+	# Onboarding UI — low value, no business data
+	"Form Tour", "Onboarding Step", "Onboarding Permission", "Module Onboarding",
+	# Site-specific state
 	"Patch Log", "Process Subscription",
-	"Number Card", "Dashboard", "Dashboard Chart",
-	"Notification", "Notification Log",
-	# Stock engine internals — managed automatically, must not be synced directly
-	"Bin",                  # recalculated by stock engine on every transaction
+	# Stock engine internals — recalculated automatically, never sync directly
+	"Bin",
 }
 
 
