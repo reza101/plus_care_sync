@@ -992,7 +992,7 @@ class SyncEngine:
 			start = 0
 			while True:
 				params = {
-					"fields": '["name","file_name","file_url","attached_to_doctype","attached_to_name","is_private","is_folder","modified"]',
+					"fields": '["name","file_name","file_url","folder","attached_to_doctype","attached_to_name","is_private","is_folder","modified"]',
 					"limit_page_length": batch_size,
 					"limit_start": start,
 				}
@@ -1015,24 +1015,32 @@ class SyncEngine:
 		except Exception as e:
 			self.log_sync_error("File", None, f"Pull files failed: {str(e)}")
 
+	# System folders that exist on every Frappe site — never re-create them.
+	_SYSTEM_FOLDERS = {"Home", "Home/Attachments", "Home/Attachments/"}
+
 	def _save_remote_file_locally(self, file_record):
 		"""Save one remote File record locally — handles folders, external URLs, and stored files."""
 		file_name = file_record.get("file_name", "")
 		file_url = file_record.get("file_url", "")
 		is_folder = int(file_record.get("is_folder") or 0)
+		folder = file_record.get("folder") or "Home"
+		remote_name = file_record.get("name", "")
 
 		if not file_name:
 			return
 
-		# Skip if the record already exists locally — check by primary key first
-		# (covers folders like "Home/Attachments" that always exist in every site),
-		# then fall back to a file_name + context match for files without a fixed name.
-		remote_name = file_record.get("name", "")
+		# Skip standard system folders that exist on every site.
+		if is_folder and remote_name in self._SYSTEM_FOLDERS:
+			return
+
+		# Skip if already exists locally by primary key.
 		if remote_name and frappe.db.exists("File", remote_name):
 			return
 
+		# Fallback duplicate check by file_name + folder + context.
 		existing = frappe.db.get_value("File", {
 			"file_name": file_name,
+			"folder": folder,
 			"attached_to_doctype": file_record.get("attached_to_doctype") or "",
 			"attached_to_name": file_record.get("attached_to_name") or "",
 		}, "name")
@@ -1042,6 +1050,7 @@ class SyncEngine:
 		base = {
 			"doctype": "File",
 			"file_name": file_name,
+			"folder": folder,
 			"attached_to_doctype": file_record.get("attached_to_doctype") or "",
 			"attached_to_name": file_record.get("attached_to_name") or "",
 			"is_private": int(file_record.get("is_private") or 0),
@@ -1049,7 +1058,9 @@ class SyncEngine:
 		}
 
 		if is_folder:
-			# Folder record — no binary content
+			# Ensure parent folder exists before creating child folder.
+			if folder and folder not in self._SYSTEM_FOLDERS and not frappe.db.exists("File", folder):
+				return  # parent not yet synced; skip — it will be retried next sync
 			file_doc = frappe.get_doc(base)
 			file_doc.flags.ignore_links = True
 			file_doc.insert(ignore_permissions=True)
