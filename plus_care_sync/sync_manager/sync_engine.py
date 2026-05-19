@@ -1252,7 +1252,6 @@ def execute_sync():
 
 		for doctype in doctypes:
 			try:
-				# Sync based on direction
 				sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
 
 				if settings.sync_direction == "Local to Live (One Way)":
@@ -1299,6 +1298,15 @@ def execute_sync():
 						"records_synced": pulled,
 						"sync_details": "Direction: Live → Local"
 					}).insert(ignore_permissions=True)
+
+				# Commit after every doctype so logs are visible immediately
+				# and a later failure does not roll back earlier work.
+				frappe.db.set_value(
+					"Sync Settings", "Sync Settings",
+					"total_synced_records", total_synced,
+					update_modified=False
+				)
+				frappe.db.commit()
 
 			except Exception as e:
 				engine.log_sync_error(doctype, None, str(e))
