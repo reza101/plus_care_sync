@@ -1019,6 +1019,11 @@ class SyncEngine:
 					headers=self.get_headers(),
 					timeout=30,
 				)
+				# Series is a raw table — not REST-accessible on all Frappe versions.
+				# Skip gracefully; counter sync requires plus_care_sync on live server.
+				if response.status_code in (404, 417):
+					self.log_sync_info("tabSeries", "Skipped: Series is not accessible via REST API on live server.")
+					return 0
 				if response.status_code != 200:
 					raise Exception(f"HTTP {response.status_code}: {response.text[:200]}")
 				rows = response.json().get("data", [])
