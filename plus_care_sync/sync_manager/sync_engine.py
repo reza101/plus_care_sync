@@ -36,6 +36,21 @@ _EXPLICIT_INCLUDE_DOCTYPES = {
 	"Language",
 	# Desk module — stores per-user UI preferences (column configs, list settings)
 	"DocType User Settings",
+	# Config/schema doctypes that must be explicitly included because their modules
+	# (Core, Custom, Desk) are in _SYSTEM_MODULES.
+	"Property Setter",
+	"Custom Field",
+	"Client Script",
+	"Server Script",
+	"Scheduled Job Type",
+	"Workspace",
+	"Workspace Link",
+	"Workspace Chart",
+	"Workspace Shortcut",
+	"Workspace Quick List",
+	"Dashboard",
+	"Dashboard Chart",
+	"Number Card",
 }
 
 # Single doctypes that must never be synced — our own app internals and
@@ -977,7 +992,8 @@ class SyncEngine:
 		return synced
 
 	def sync_naming_series(self):
-		"""Pull tabSeries counters from the remote server and apply locally.
+		"""Pull tabSeries counters from the remote server using the standard
+		Frappe REST API — no custom endpoint required on the live server.
 
 		Only runs in Live→Local or Bidirectional direction so local counters
 		never overwrite the live server's authoritative sequence numbers.
@@ -986,23 +1002,44 @@ class SyncEngine:
 		if direction not in ("Live to Local (One Way)", "Bidirectional (Two Way)"):
 			return 0
 		try:
-			endpoint = f"{self.remote_url}/api/method/plus_care_sync.sync_manager.sync_engine.get_series_data"
-			response = requests.get(endpoint, headers=self.get_headers(), timeout=30)
-			if response.status_code != 200:
-				raise Exception(f"HTTP {response.status_code}: {response.text[:200]}")
-			rows = response.json().get("message", [])
-			for row in rows:
-				name = row.get("name")
-				current = row.get("current")
-				if not name:
-					continue
-				exists = frappe.db.sql("SELECT name FROM `tabSeries` WHERE name = %s", name)
-				if exists:
-					frappe.db.sql("UPDATE `tabSeries` SET current = %s WHERE name = %s", (current, name))
-				else:
-					frappe.db.sql("INSERT INTO `tabSeries` (name, current) VALUES (%s, %s)", (name, current))
+			# Series is a standard Frappe doctype backed by tabSeries —
+			# accessible on any Frappe site without additional apps.
+			endpoint = f"{self.remote_url}/api/resource/Series"
+			batch_size = 500
+			start = 0
+			total = 0
+			while True:
+				response = requests.get(
+					endpoint,
+					params={
+						"fields": '["name","current"]',
+						"limit_page_length": batch_size,
+						"limit_start": start,
+					},
+					headers=self.get_headers(),
+					timeout=30,
+				)
+				if response.status_code != 200:
+					raise Exception(f"HTTP {response.status_code}: {response.text[:200]}")
+				rows = response.json().get("data", [])
+				if not rows:
+					break
+				for row in rows:
+					name = row.get("name")
+					current = row.get("current")
+					if not name:
+						continue
+					exists = frappe.db.sql("SELECT name FROM `tabSeries` WHERE name = %s", name)
+					if exists:
+						frappe.db.sql("UPDATE `tabSeries` SET current = %s WHERE name = %s", (current, name))
+					else:
+						frappe.db.sql("INSERT INTO `tabSeries` (name, current) VALUES (%s, %s)", (name, current))
+				total += len(rows)
+				if len(rows) < batch_size:
+					break
+				start += batch_size
 			frappe.db.commit()
-			return len(rows)
+			return total
 		except Exception as e:
 			self.log_sync_error("tabSeries", None, str(e))
 			return 0
