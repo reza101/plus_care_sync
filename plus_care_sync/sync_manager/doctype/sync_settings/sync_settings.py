@@ -97,28 +97,8 @@ class SyncSettings(Document):
 
 	@frappe.whitelist()
 	def reset_last_sync_time(self):
-		"""Clear last sync time and any stuck Syncing status, then trigger a full re-sync."""
-		frappe.db.set_value("Sync Settings", "Sync Settings", {
-			"last_sync_time": None,
-			"sync_status": "Idle",
-		})
-		frappe.db.commit()
-		self.last_sync_time = None
-		self.sync_status = "Idle"
-
-		# Start full sync immediately after reset
-		frappe.enqueue(
-			"plus_care_sync.sync_manager.sync_engine.execute_sync",
-			queue="long",
-			timeout=3600,
-			is_async=True,
-		)
-
-		frappe.msgprint(
-			_("Sync time cleared. Full re-sync started in background."),
-			indicator="blue",
-			alert=True
-		)
+		"""Kept for backward compatibility — delegates to the module-level function."""
+		reset_last_sync_time()
 
 	@frappe.whitelist()
 	def sync_now(self):
@@ -145,6 +125,33 @@ class SyncSettings(Document):
 	def view_sync_logs(self):
 		"""Redirect to sync logs"""
 		frappe.set_route("List", "Sync Log")
+
+
+@frappe.whitelist()
+def reset_last_sync_time():
+	"""Clear last sync time and any stuck Syncing status, then trigger a full re-sync.
+
+	Standalone function so the JS can call it via its full module path, avoiding
+	the run_doc_method route that requires a serialised document in the request.
+	"""
+	frappe.db.set_value("Sync Settings", "Sync Settings", {
+		"last_sync_time": None,
+		"sync_status": "Idle",
+	})
+	frappe.db.commit()
+
+	frappe.enqueue(
+		"plus_care_sync.sync_manager.sync_engine.execute_sync",
+		queue="long",
+		timeout=3600,
+		is_async=True,
+	)
+
+	frappe.msgprint(
+		_("Sync time cleared. Full re-sync started in background."),
+		indicator="blue",
+		alert=True
+	)
 
 
 @frappe.whitelist()

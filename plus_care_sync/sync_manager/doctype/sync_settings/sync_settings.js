@@ -157,8 +157,7 @@ frappe.ui.form.on('Sync Settings', {
 			function() {
 				frappe.show_alert({message: __('Resetting and starting full sync...'), indicator: 'blue'});
 				frappe.call({
-					method: 'reset_last_sync_time',
-					doc: frm.doc,
+					method: 'plus_care_sync.sync_manager.doctype.sync_settings.sync_settings.reset_last_sync_time',
 					callback: function(r) {
 						frm.reload_doc();
 					}
