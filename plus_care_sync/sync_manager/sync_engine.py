@@ -828,6 +828,13 @@ class SyncEngine:
 						doc.flags.ignore_links = True
 						try:
 							doc.insert()
+							# Preserve the original creation timestamp from the live server.
+							# doc.insert() always sets creation to now() internally.
+							if remote_data.get("creation"):
+								frappe.db.sql(
+									f"UPDATE `tab{doctype}` SET creation = %s WHERE name = %s",
+									(remote_data["creation"], name)
+								)
 							frappe.db.commit()
 						except Exception as insert_err:
 							if "1062" in str(insert_err) or "Duplicate entry" in str(insert_err):
@@ -898,6 +905,13 @@ class SyncEngine:
 			doc.flags.ignore_validate = True
 			doc.flags.ignore_links = True
 			doc.db_insert()
+			# Force the original creation timestamp from the live server.
+			# db_insert() may still override creation via set_defaults.
+			if data.get("creation"):
+				frappe.db.sql(
+					f"UPDATE `tab{doctype}` SET creation = %s WHERE name = %s",
+					(data["creation"], data.get("name") or doc.name)
+				)
 		else:
 			top_fields = {k: v for k, v in data.items() if k not in ("name", "doctype")}
 			if top_fields:
