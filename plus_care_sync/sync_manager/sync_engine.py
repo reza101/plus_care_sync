@@ -820,46 +820,12 @@ class SyncEngine:
 							)
 						frappe.db.commit()
 					else:
-						if not remote_data.get(parent_field):
-							existing_root = frappe.db.get_value(
-								doctype, {parent_field: ("in", ["", None])}, "name"
-							)
-							if existing_root and name != existing_root:
-								remote_data[parent_field] = existing_root
-
-						remote_data["doctype"] = doctype
-						doc = frappe.get_doc(remote_data)
-						doc.flags.ignore_permissions = True
-						doc.flags.ignore_mandatory = True
-						doc.flags.ignore_validate = True
-						doc.flags.ignore_links = True
-						try:
-							doc.insert()
-							# Preserve the original creation/modified from the live server.
-							# doc.insert() always overwrites both via set_defaults.
-							if remote_data.get("creation") or remote_data.get("modified"):
-								frappe.db.sql(
-									f"UPDATE `tab{doctype}` SET creation = %s, modified = %s WHERE name = %s",
-									(remote_data.get("creation"), remote_data.get("modified"), name)
-								)
-							frappe.db.commit()
-						except Exception as insert_err:
-							if "1062" in str(insert_err) or "Duplicate entry" in str(insert_err):
-								# autoname transformed the remote name (e.g. "Sales") into a
-								# name that already exists locally (e.g. "Sales - PCPM").
-								# Update the existing local record with the remote fields.
-								actual_name = getattr(doc, "name", name)
-								if frappe.db.exists(doctype, actual_name):
-									update_fields = {k: v for k, v in remote_data.items()
-										if k not in ("name", "doctype")}
-									if update_fields:
-										frappe.db.set_value(doctype, actual_name,
-											update_fields, update_modified=False)
-									frappe.db.commit()
-								else:
-									raise
-							else:
-								raise
+						# Use raw db_insert (via _write_doc_directly) instead of
+						# doc.insert() to bypass ERPNext controller hooks — Account.validate(),
+						# NestedSet.validate_loop(), etc. — that fail on an empty or
+						# partially-populated tree. rebuild_tree() after the batch fixes
+						# all lft/rgt values so the hierarchy is always consistent.
+						self._write_doc_directly(doctype, name, remote_data, is_new=True)
 
 					if skip_rebuild:
 						return (doctype, parent_field)
