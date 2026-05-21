@@ -509,13 +509,13 @@ class SyncEngine:
 			# Check if document exists on remote
 			response = requests.get(endpoint, headers=self.get_headers(), timeout=30)
 
-			doc_dict = doc.as_dict()
+			doc_dict = json.dumps(doc.as_dict(), default=str)
 
 			if response.status_code == 200:
 				# Update existing document
 				response = requests.put(
 					endpoint,
-					json=doc_dict,
+					data=doc_dict,
 					headers=self.get_headers(),
 					timeout=30
 				)
@@ -524,7 +524,7 @@ class SyncEngine:
 				endpoint = f"{self.remote_url}/api/resource/{encoded_doctype}"
 				response = requests.post(
 					endpoint,
-					json=doc_dict,
+					data=doc_dict,
 					headers=self.get_headers(),
 					timeout=30
 				)
