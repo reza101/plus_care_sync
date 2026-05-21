@@ -812,7 +812,13 @@ class SyncEngine:
 							if k not in ("name", "doctype")}
 						if update_fields:
 							frappe.db.set_value(doctype, name, update_fields, update_modified=False)
-							frappe.db.commit()
+						# set_value silently drops `creation` — enforce via raw SQL.
+						if remote_data.get("creation"):
+							frappe.db.sql(
+								f"UPDATE `tab{doctype}` SET creation = %s WHERE name = %s",
+								(remote_data["creation"], name)
+							)
+						frappe.db.commit()
 					else:
 						if not remote_data.get(parent_field):
 							existing_root = frappe.db.get_value(
@@ -1350,9 +1356,15 @@ def execute_sync():
 		engine = SyncEngine()
 		doctypes = engine.get_doctypes_to_sync()
 
-		# Full Database + Live→Local: wipe all local data first so the local DB
-		# becomes an exact mirror of live (no stale records left behind).
-		if settings.data_type == "Full Database" and settings.sync_direction == "Live to Local (One Way)":
+		# Full Database + Live→Local + no last_sync_time (initial/reset full sync):
+		# wipe all local data first so the local DB becomes an exact mirror of live.
+		# Skip on incremental runs (last_sync_time is set) — clearing then only
+		# pulling recently-changed records would discard all older data.
+		if (
+			settings.data_type == "Full Database"
+			and settings.sync_direction == "Live to Local (One Way)"
+			and not settings.last_sync_time
+		):
 			engine.clear_local_data(doctypes)
 
 		total_synced = 0
