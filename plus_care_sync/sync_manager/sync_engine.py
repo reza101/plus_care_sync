@@ -1080,24 +1080,47 @@ class SyncEngine:
 			self.log_sync_error("tabSeries", None, str(e))
 			return 0
 
+	# Records that must never be deleted during a full clear — removing them
+	# would break the local site's authentication and admin access.
+	_PRESERVE_RECORDS = {
+		"User": ["Administrator", "Guest"],
+	}
+
 	def clear_local_data(self, doctypes):
 		"""Delete all local records for the given doctypes before a full Live→Local sync.
 
 		Runs with FOREIGN_KEY_CHECKS=0 so deletion order does not matter.
 		Child table rows are deleted per-parent-doctype to avoid orphans.
+		Records listed in _PRESERVE_RECORDS are kept so the local site stays functional.
 		"""
 		try:
 			frappe.db.sql("SET FOREIGN_KEY_CHECKS = 0")
 			for doctype in doctypes:
 				try:
+					preserve = self._PRESERVE_RECORDS.get(doctype, [])
 					meta = frappe.get_meta(doctype)
 					for field in meta.fields:
 						if field.fieldtype == "Table" and field.options:
-							frappe.db.sql(
-								f"DELETE FROM `tab{field.options}` WHERE parenttype = %s",
-								doctype
-							)
-					frappe.db.sql(f"DELETE FROM `tab{doctype}`")
+							if preserve:
+								placeholders = ", ".join(["%s"] * len(preserve))
+								frappe.db.sql(
+									f"DELETE FROM `tab{field.options}` WHERE parenttype = %s"
+									f" AND parent NOT IN ({placeholders})",
+									[doctype] + preserve,
+								)
+							else:
+								frappe.db.sql(
+									f"DELETE FROM `tab{field.options}` WHERE parenttype = %s",
+									doctype,
+								)
+					if preserve:
+						placeholders = ", ".join(["%s"] * len(preserve))
+						frappe.db.sql(
+							f"DELETE FROM `tab{doctype}` WHERE name NOT IN ({placeholders})",
+							preserve,
+						)
+					else:
+						frappe.db.sql(f"DELETE FROM `tab{doctype}`")
 				except Exception as e:
 					frappe.log_error(
 						f"clear_local_data: failed to clear {doctype}: {str(e)}",
