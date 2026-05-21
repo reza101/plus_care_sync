@@ -25,6 +25,9 @@ _EXPLICIT_INCLUDE_DOCTYPES = {
 	"Translation",
 	"Employee",
 	"POS Profile",
+	# Core module — stores per-user and global defaults (default_company, currency …)
+	# Without this, Purchase Invoice / POS have no default company after a full sync.
+	"DefaultValue",
 	# Core module — needed as link targets for User
 	"Role",
 	"Role Profile",
@@ -1517,6 +1520,11 @@ def execute_sync():
 		frappe.db.set_value("Sync Settings", "Sync Settings", "pending_sync_count", pending_count)
 
 		frappe.db.commit()
+
+		# Raw SQL inserts bypass all Frappe hooks that normally invalidate the
+		# Redis document/defaults cache. Clear the entire site cache so the next
+		# page load (POS, Purchase Invoice, etc.) reads fresh data from the DB.
+		frappe.clear_cache()
 
 		# Return message based on mode
 		if settings.sync_mode == "Manual":
