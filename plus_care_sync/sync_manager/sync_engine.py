@@ -861,11 +861,12 @@ class SyncEngine:
 			raise Exception(f"Failed to update local record: {str(e)}")
 
 	def _write_doc_directly(self, doctype, name, data, is_new):
-		"""Write a document via raw DB operations, bypassing all Frappe hooks and validation.
+		"""Write a document via raw DB operations, bypassing ALL Frappe hooks and validation.
 
-		This avoids controller-level errors (mandatory fields, link checks, docstatus
-		restrictions, stale-document conflicts) that prevent normal save/insert from
-		working in a data-replication context.
+		Uses pure SQL INSERT/UPDATE so that controller hooks (before_insert, after_insert,
+		validate, etc.) never execute.  This is critical after clear_local_data() because
+		ERPNext controllers (e.g. Company.after_insert creates chart-of-accounts,
+		Account.validate checks parent existence) fail on an empty database.
 		"""
 		meta = frappe.get_meta(doctype)
 		table_fields = {f.fieldname: f.options for f in meta.fields if f.fieldtype == "Table"}
@@ -875,19 +876,27 @@ class SyncEngine:
 		child_data = {fn: (data.pop(fn, None) or []) for fn in table_fields}
 
 		if is_new:
-			data.setdefault("doctype", doctype)
-			doc = frappe.get_doc(data)
-			doc.flags.ignore_permissions = True
-			doc.flags.ignore_mandatory = True
-			doc.flags.ignore_validate = True
-			doc.flags.ignore_links = True
-			doc.db_insert()
-			# Force the original creation/modified timestamps from the live server.
-			# db_insert() overrides both via set_defaults — fix with raw SQL.
+			# Restrict to columns that actually exist in the DB table so we never
+			# hit "Unknown column" errors from version-mismatched or custom fields.
+			db_cols = {row[0] for row in frappe.db.sql(f"SHOW COLUMNS FROM `tab{doctype}`")}
+			row = {k: v for k, v in data.items() if k in db_cols}
+			row.setdefault("name", name)
+			row.setdefault("owner", frappe.session.user or "Administrator")
+			row.setdefault("modified_by", frappe.session.user or "Administrator")
+			row.setdefault("docstatus", 0)
+			cols = list(row.keys())
+			vals = [row[c] for c in cols]
+			col_expr = ", ".join(f"`{c}`" for c in cols)
+			placeholders = ", ".join(["%s"] * len(cols))
+			frappe.db.sql(
+				f"INSERT INTO `tab{doctype}` ({col_expr}) VALUES ({placeholders})",
+				vals
+			)
+			# Force original timestamps — the INSERT may have applied DB defaults.
 			if data.get("creation") or data.get("modified"):
 				frappe.db.sql(
 					f"UPDATE `tab{doctype}` SET creation = %s, modified = %s WHERE name = %s",
-					(data.get("creation"), data.get("modified"), data.get("name") or doc.name)
+					(data.get("creation"), data.get("modified"), name)
 				)
 		else:
 			top_fields = {k: v for k, v in data.items() if k not in ("name", "doctype")}
@@ -900,7 +909,7 @@ class SyncEngine:
 					(data["creation"], name)
 				)
 
-		# Replace child table rows via direct SQL
+		# Replace child table rows via direct SQL (no document object — no hooks)
 		for fieldname, child_doctype in table_fields.items():
 			rows = child_data.get(fieldname) or []
 			frappe.db.delete(child_doctype, {
@@ -908,6 +917,7 @@ class SyncEngine:
 				"parenttype": doctype,
 				"parentfield": fieldname,
 			})
+			child_db_cols = {row[0] for row in frappe.db.sql(f"SHOW COLUMNS FROM `tab{child_doctype}`")}
 			for idx, row in enumerate(rows, 1):
 				row = dict(row)
 				row.update({
@@ -915,16 +925,19 @@ class SyncEngine:
 					"parenttype": doctype,
 					"parentfield": fieldname,
 					"idx": idx,
-					"doctype": child_doctype,
 				})
 				if not row.get("name"):
 					row["name"] = frappe.generate_hash(length=10)
-				child_doc = frappe.get_doc(row)
-				child_doc.flags.ignore_permissions = True
-				child_doc.flags.ignore_mandatory = True
-				child_doc.flags.ignore_validate = True
-				child_doc.flags.ignore_links = True
-				child_doc.db_insert()
+				child_row = {k: v for k, v in row.items() if k in child_db_cols}
+				child_row.setdefault("name", frappe.generate_hash(length=10))
+				c_cols = list(child_row.keys())
+				c_vals = [child_row[c] for c in c_cols]
+				c_col_expr = ", ".join(f"`{c}`" for c in c_cols)
+				c_placeholders = ", ".join(["%s"] * len(c_cols))
+				frappe.db.sql(
+					f"INSERT INTO `tab{child_doctype}` ({c_col_expr}) VALUES ({c_placeholders})",
+					c_vals
+				)
 
 		frappe.db.commit()
 
