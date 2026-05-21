@@ -333,6 +333,10 @@ _EXCLUDED_DOCTYPES = {
 	"Patch Log", "Process Subscription",
 	# Stock engine internals — recalculated automatically, never sync directly
 	"Bin",
+	# File is handled exclusively by sync_files() which downloads actual binary
+	# content. Letting the main loop process File creates DB records without
+	# file content, then sync_files() skips them because db.exists() is True.
+	"File",
 }
 
 
@@ -1128,6 +1132,14 @@ class SyncEngine:
 	def _pull_files_from_remote(self, doctypes_synced):
 		"""Download all File records from remote (attachments, standalone, folders)."""
 		try:
+			# Full Database initial sync (no last_sync_time): clear existing File
+			# records first so we get an exact mirror of live. System folders are
+			# preserved because Frappe creates them automatically on every site.
+			if self.settings.data_type == "Full Database" and not self.settings.last_sync_time:
+				preserve_names = ", ".join(f"'{f}'" for f in self._SYSTEM_FOLDERS)
+				frappe.db.sql(f"DELETE FROM `tabFile` WHERE name NOT IN ({preserve_names})")
+				frappe.db.commit()
+
 			endpoint = f"{self.remote_url}/api/resource/File"
 			batch_size = int(self.settings.batch_size or 50)
 
