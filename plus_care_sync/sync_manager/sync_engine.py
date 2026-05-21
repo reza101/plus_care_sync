@@ -792,7 +792,9 @@ class SyncEngine:
 				# Determine if we should update based on conflict resolution
 				should_update = True
 				if frappe.db.exists(doctype, name):
-					if self.settings.conflict_resolution == "Latest Timestamp Wins":
+					if self.settings.data_type == "Full Database":
+						should_update = self.settings.sync_direction == "Live to Local (One Way)"
+					elif self.settings.conflict_resolution == "Latest Timestamp Wins":
 						local_modified = frappe.db.get_value(doctype, name, "modified")
 						remote_modified = remote_data.get("modified")
 						r_dt = _parse_dt(remote_modified)
@@ -800,7 +802,6 @@ class SyncEngine:
 						if r_dt and l_dt and r_dt <= l_dt:
 							should_update = False
 					elif self.settings.conflict_resolution == "Local Server Wins":
-						# FIX 3: explicit local-wins — skip update
 						should_update = False
 
 				if should_update:
@@ -828,12 +829,12 @@ class SyncEngine:
 						doc.flags.ignore_links = True
 						try:
 							doc.insert()
-							# Preserve the original creation timestamp from the live server.
-							# doc.insert() always sets creation to now() internally.
-							if remote_data.get("creation"):
+							# Preserve the original creation/modified from the live server.
+							# doc.insert() always overwrites both via set_defaults.
+							if remote_data.get("creation") or remote_data.get("modified"):
 								frappe.db.sql(
-									f"UPDATE `tab{doctype}` SET creation = %s WHERE name = %s",
-									(remote_data["creation"], name)
+									f"UPDATE `tab{doctype}` SET creation = %s, modified = %s WHERE name = %s",
+									(remote_data.get("creation"), remote_data.get("modified"), name)
 								)
 							frappe.db.commit()
 						except Exception as insert_err:
@@ -863,17 +864,21 @@ class SyncEngine:
 
 			else:
 				if frappe.db.exists(doctype, name):
-					should_update = False
-					if self.settings.conflict_resolution == "Live Server Wins":
+					# Full Database mode overrides the conflict resolution setting:
+					#   Live→Local  → live always wins (mirror live onto local)
+					#   Local→Live  → local always wins (don't overwrite local data)
+					if self.settings.data_type == "Full Database":
+						should_update = self.settings.sync_direction == "Live to Local (One Way)"
+					elif self.settings.conflict_resolution == "Live Server Wins":
 						should_update = True
 					elif self.settings.conflict_resolution == "Latest Timestamp Wins":
 						remote_modified = remote_data.get("modified")
 						local_modified = frappe.db.get_value(doctype, name, "modified")
 						r_dt = _parse_dt(remote_modified)
 						l_dt = _parse_dt(local_modified)
-						if r_dt and l_dt and r_dt > l_dt:
-							should_update = True
-					# "Local Server Wins" or unrecognized — keep local, skip update
+						should_update = bool(r_dt and l_dt and r_dt > l_dt)
+					else:
+						should_update = False
 
 					if should_update:
 						self._write_doc_directly(doctype, name, remote_data, is_new=False)
@@ -905,17 +910,23 @@ class SyncEngine:
 			doc.flags.ignore_validate = True
 			doc.flags.ignore_links = True
 			doc.db_insert()
-			# Force the original creation timestamp from the live server.
-			# db_insert() may still override creation via set_defaults.
-			if data.get("creation"):
+			# Force the original creation/modified timestamps from the live server.
+			# db_insert() overrides both via set_defaults — fix with raw SQL.
+			if data.get("creation") or data.get("modified"):
 				frappe.db.sql(
-					f"UPDATE `tab{doctype}` SET creation = %s WHERE name = %s",
-					(data["creation"], data.get("name") or doc.name)
+					f"UPDATE `tab{doctype}` SET creation = %s, modified = %s WHERE name = %s",
+					(data.get("creation"), data.get("modified"), data.get("name") or doc.name)
 				)
 		else:
 			top_fields = {k: v for k, v in data.items() if k not in ("name", "doctype")}
 			if top_fields:
 				frappe.db.set_value(doctype, name, top_fields, update_modified=False)
+			# frappe.db.set_value may silently skip creation — enforce via raw SQL.
+			if data.get("creation"):
+				frappe.db.sql(
+					f"UPDATE `tab{doctype}` SET creation = %s WHERE name = %s",
+					(data["creation"], name)
+				)
 
 		# Replace child table rows via direct SQL
 		for fieldname, child_doctype in table_fields.items():
