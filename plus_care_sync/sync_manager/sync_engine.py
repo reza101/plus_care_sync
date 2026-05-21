@@ -1074,6 +1074,38 @@ class SyncEngine:
 			self.log_sync_error("tabSeries", None, str(e))
 			return 0
 
+	def clear_local_data(self, doctypes):
+		"""Delete all local records for the given doctypes before a full Live→Local sync.
+
+		Runs with FOREIGN_KEY_CHECKS=0 so deletion order does not matter.
+		Child table rows are deleted per-parent-doctype to avoid orphans.
+		"""
+		try:
+			frappe.db.sql("SET FOREIGN_KEY_CHECKS = 0")
+			for doctype in doctypes:
+				try:
+					meta = frappe.get_meta(doctype)
+					for field in meta.fields:
+						if field.fieldtype == "Table" and field.options:
+							frappe.db.sql(
+								f"DELETE FROM `tab{field.options}` WHERE parenttype = %s",
+								doctype
+							)
+					frappe.db.sql(f"DELETE FROM `tab{doctype}`")
+				except Exception as e:
+					frappe.log_error(
+						f"clear_local_data: failed to clear {doctype}: {str(e)}",
+						"Plus Care Sync"
+					)
+		finally:
+			frappe.db.sql("SET FOREIGN_KEY_CHECKS = 1")
+			frappe.db.commit()
+
+		self.log_sync_info(
+			"clear_local_data",
+			f"Cleared {len(doctypes)} doctypes before full Live to Local sync."
+		)
+
 	def sync_files(self, doctypes_synced):
 		"""Sync File records (attachments + item images) for all doctypes that were synced."""
 		direction = self.settings.sync_direction
@@ -1317,6 +1349,11 @@ def execute_sync():
 
 		engine = SyncEngine()
 		doctypes = engine.get_doctypes_to_sync()
+
+		# Full Database + Live→Local: wipe all local data first so the local DB
+		# becomes an exact mirror of live (no stale records left behind).
+		if settings.data_type == "Full Database" and settings.sync_direction == "Live to Local (One Way)":
+			engine.clear_local_data(doctypes)
 
 		total_synced = 0
 
