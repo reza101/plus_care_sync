@@ -60,6 +60,9 @@ _EXPLICIT_INCLUDE_DOCTYPES = {
 # is excluded so that overwriting local connection settings doesn't break sync.
 _SINGLE_SYNC_EXCLUDE = {
 	"Sync Settings",          # this app's own config
+	"Security Settings",      # does not exist in Frappe v15; live returns HTTP 500
+	"System Health Report",   # all child tables are is_virtual=1 — no DB tables exist
+	"Payment Reconciliation", # all child tables are is_virtual=1 — UI tool, not stored data
 }
 
 # Sync order matters: foundational doctypes must arrive before the records that
@@ -542,6 +545,9 @@ class SyncEngine:
 		while True:
 			params = dict(base_params, limit_start=start)
 			response = requests.get(endpoint, params=params, headers=self.get_headers(), timeout=30)
+			if response.status_code == 404:
+				# Doctype doesn't exist on remote (custom app not installed there) — skip silently
+				return
 			if response.status_code != 200:
 				raise Exception(f"Failed to pull from remote (HTTP {response.status_code}): {response.text}")
 			page = response.json().get("data", [])
@@ -776,6 +782,11 @@ class SyncEngine:
 			parent_field = f"parent_{frappe.scrub(doctype)}" if is_tree else None
 			name = remote_data.get("name")
 
+			# Never overwrite records that must stay local (e.g. Administrator user).
+			# These records are also protected from deletion by _PRESERVE_RECORDS.
+			if name in _PRESERVE_RECORDS.get(doctype, []):
+				return
+
 			# Some doctypes declare is_tree=1 (e.g. Employee) but the actual DB
 			# table was never migrated with NestedSet columns (lft, rgt, parent_*).
 			# Verify the column exists before taking the tree code path; if not,
@@ -972,11 +983,16 @@ class SyncEngine:
 			skip_fields = {"name", "doctype", "modified", "modified_by", "creation", "owner", "docstatus"}
 
 			meta = frappe.get_meta(doctype)
-			table_fields = {f.fieldname: f.options for f in meta.fields if f.fieldtype == "Table"}
+			# Include Table MultiSelect — stored in child tables just like Table fields
+			table_fields = {f.fieldname: f.options for f in meta.fields
+							if f.fieldtype in ("Table", "Table MultiSelect")}
 
-			# Separate scalar fields (→ tabSingles) from child table fields (→ child tables)
+			# Separate scalar fields (→ tabSingles) from child table fields (→ child tables).
+			# Also skip any value that is a list/dict — those are unmapped child data coming
+			# from the remote and would cause a SQL type error if written as a scalar.
 			scalar_fields = {k: v for k, v in remote_data.items()
-							 if k not in skip_fields and k not in table_fields}
+							 if k not in skip_fields and k not in table_fields
+							 and not isinstance(v, (list, dict))}
 			child_table_data = {fn: remote_data[fn] for fn in table_fields if fn in remote_data}
 
 			if not scalar_fields and not child_table_data:
@@ -1003,6 +1019,9 @@ class SyncEngine:
 					continue
 				rows = child_table_data[fieldname] or []
 				try:
+					if not frappe.db.table_exists(child_doctype):
+						# Virtual child table (is_virtual=1) — no DB table; skip silently
+						continue
 					frappe.db.delete(child_doctype, {
 						"parent": doctype,
 						"parenttype": doctype,
