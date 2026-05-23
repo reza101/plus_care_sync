@@ -1422,20 +1422,6 @@ def execute_sync():
 
 		total_synced = 0
 
-		if settings.sync_erp_settings or settings.data_type == "Full Database":
-			settings_synced = engine.sync_erp_settings()
-			total_synced += settings_synced
-			sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
-			frappe.get_doc({
-				"doctype": "Sync Log",
-				"sync_type": sync_type,
-				"doctype_name": "ERP Settings",
-				"status": "Success",
-				"records_synced": settings_synced,
-				"sync_details": "Single/Settings doctypes synced"
-			}).insert(ignore_permissions=True)
-			frappe.db.commit()
-
 		for doctype in doctypes:
 			try:
 				sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
@@ -1511,6 +1497,22 @@ def execute_sync():
 
 			except Exception as e:
 				engine.log_sync_error(doctype, None, str(e))
+
+		# Sync Singles AFTER all regular doctypes so link targets (e.g. Print Style
+		# referenced by Print Settings) already exist when Singles are written.
+		if settings.sync_erp_settings or settings.data_type == "Full Database":
+			settings_synced = engine.sync_erp_settings()
+			total_synced += settings_synced
+			sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
+			frappe.get_doc({
+				"doctype": "Sync Log",
+				"sync_type": sync_type,
+				"doctype_name": "ERP Settings",
+				"status": "Success",
+				"records_synced": settings_synced,
+				"sync_details": "Single/Settings doctypes synced"
+			}).insert(ignore_permissions=True)
+			frappe.db.commit()
 
 		# Sync attachments and item images after all document doctypes are done
 		try:
