@@ -455,6 +455,8 @@ class SyncEngine:
 	def sync_doctype(self, doctype):
 		"""Sync a specific doctype"""
 		try:
+			if not frappe.db.table_exists(doctype):
+				return 0
 			batch_size = int(self.settings.batch_size or 50)
 			filters = {}
 			if self.settings.last_sync_time:
@@ -553,6 +555,8 @@ class SyncEngine:
 	def pull_from_remote(self, doctype):
 		"""Pull documents from remote server"""
 		try:
+			if not frappe.db.table_exists(doctype):
+				return 0
 			# URL encode doctype name (e.g., "Item Group" -> "Item%20Group")
 			encoded_doctype = quote(doctype)
 			endpoint = f"{self.remote_url}/api/resource/{encoded_doctype}"
@@ -966,18 +970,57 @@ class SyncEngine:
 				return
 			remote_data = self._strip_unknown_fields(doctype, remote_data)
 			skip_fields = {"name", "doctype", "modified", "modified_by", "creation", "owner", "docstatus"}
-			fields_to_write = {k: v for k, v in remote_data.items() if k not in skip_fields}
-			if not fields_to_write:
+
+			meta = frappe.get_meta(doctype)
+			table_fields = {f.fieldname: f.options for f in meta.fields if f.fieldtype == "Table"}
+
+			# Separate scalar fields (→ tabSingles) from child table fields (→ child tables)
+			scalar_fields = {k: v for k, v in remote_data.items()
+							 if k not in skip_fields and k not in table_fields}
+			child_table_data = {fn: remote_data[fn] for fn in table_fields if fn in remote_data}
+
+			if not scalar_fields and not child_table_data:
 				return
-			# Clear only after confirming we have valid data — deleting before the
-			# check left tabSingles empty when remote returned no writable fields,
-			# causing Frappe boot to read None for critical settings like allow_print_for_draft.
+
+			# Clear only after confirming valid data exists — deleting before this
+			# check left tabSingles empty when remote returned no writable fields.
 			frappe.db.sql("DELETE FROM `tabSingles` WHERE doctype = %s", doctype)
-			for fieldname, value in fields_to_write.items():
+
+			for fieldname, value in scalar_fields.items():
 				try:
 					frappe.db.set_value(doctype, None, fieldname, value, update_modified=False)
 				except Exception as e:
 					self.log_sync_error(doctype, doctype, f"field '{fieldname}': {str(e)}")
+
+			for fieldname, child_doctype in table_fields.items():
+				if fieldname not in child_table_data:
+					continue
+				rows = child_table_data[fieldname] or []
+				try:
+					frappe.db.delete(child_doctype, {
+						"parent": doctype,
+						"parenttype": doctype,
+						"parentfield": fieldname,
+					})
+					child_db_cols = {r[0] for r in frappe.db.sql(f"SHOW COLUMNS FROM `tab{child_doctype}`")}
+					for idx, row in enumerate(rows, 1):
+						row = dict(row)
+						row.update({"parent": doctype, "parenttype": doctype,
+									"parentfield": fieldname, "idx": idx})
+						if not row.get("name"):
+							row["name"] = frappe.generate_hash(length=10)
+						child_row = {k: v for k, v in row.items() if k in child_db_cols}
+						child_row.setdefault("name", frappe.generate_hash(length=10))
+						c_cols = list(child_row.keys())
+						c_col_expr = ", ".join(f"`{c}`" for c in c_cols)
+						c_placeholders = ", ".join(["%s"] * len(c_cols))
+						frappe.db.sql(
+							f"INSERT INTO `tab{child_doctype}` ({c_col_expr}) VALUES ({c_placeholders})",
+							[child_row[c] for c in c_cols]
+						)
+				except Exception as e:
+					self.log_sync_error(doctype, doctype, f"child table '{fieldname}': {str(e)}")
+
 			frappe.db.commit()
 		except Exception as e:
 			raise Exception(f"Failed to pull single doctype {doctype} from remote: {str(e)}")
