@@ -966,12 +966,15 @@ class SyncEngine:
 				return
 			remote_data = self._strip_unknown_fields(doctype, remote_data)
 			skip_fields = {"name", "doctype", "modified", "modified_by", "creation", "owner", "docstatus"}
+			# Clear all existing rows for this Single so local exactly mirrors live.
+			# Without this, fields present locally but absent on live are never removed.
+			frappe.db.sql("DELETE FROM `tabSingles` WHERE doctype = %s", doctype)
 			for fieldname, value in remote_data.items():
 				if fieldname not in skip_fields:
 					try:
 						frappe.db.set_value(doctype, None, fieldname, value, update_modified=False)
-					except Exception:
-						pass
+					except Exception as e:
+						self.log_sync_error(doctype, doctype, f"field '{fieldname}': {str(e)}")
 			frappe.db.commit()
 		except Exception as e:
 			raise Exception(f"Failed to pull single doctype {doctype} from remote: {str(e)}")
@@ -1598,8 +1601,10 @@ def debug_settings_sync():
 		"Authorization": f"token {settings.api_key}:{api_secret}",
 		"Content-Type": "application/json"
 	}
+	all_singles = [d.name for d in frappe.get_all("DocType", filters={"issingle": 1}, fields=["name"])
+				   if d.name not in _SINGLE_SYNC_EXCLUDE]
 	results = {}
-	for doctype in _SINGLE_SETTINGS_DOCTYPES:
+	for doctype in all_singles:
 		encoded = quote(doctype)
 		url = f"{settings.remote_url.rstrip('/')}/api/resource/{encoded}/{encoded}"
 		try:
