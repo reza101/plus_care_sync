@@ -56,23 +56,10 @@ _EXPLICIT_INCLUDE_DOCTYPES = {
 	"Number Card",
 }
 
-# Single doctypes that must never be synced — our own app internals and
-# pure system records that have no meaning on another site.
+# Single doctypes that must never be synced — only this app's own config
+# is excluded so that overwriting local connection settings doesn't break sync.
 _SINGLE_SYNC_EXCLUDE = {
 	"Sync Settings",          # this app's own config
-	"Installation",           # site-specific install record
-	"Patch Log",              # site-specific migration history
-	"System Settings",        # site-specific (hostname, timezone, mail)
-	"Website Settings",       # site-specific domain/branding
-	"Blogger",                # site-specific blog identity
-	"Portal Settings",        # site-specific portal config
-	"Social Login Key",       # site-specific OAuth keys
-	"OAuth Settings",         # site-specific OAuth
-	"LDAP Settings",          # site-specific LDAP
-	"Domain Settings",        # site-specific domains
-	"Energy Point Settings",  # gamification, site-specific
-	"Prepared Report",        # cached report output, site-specific
-	"Webhook Request Log",    # request audit log, site-specific
 }
 
 # Sync order matters: foundational doctypes must arrive before the records that
