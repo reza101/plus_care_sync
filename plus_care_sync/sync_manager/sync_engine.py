@@ -986,6 +986,12 @@ class SyncEngine:
 			# check left tabSingles empty when remote returned no writable fields.
 			frappe.db.sql("DELETE FROM `tabSingles` WHERE doctype = %s", doctype)
 
+			# frappe.db.get_singles_dict() returns only tabSingles rows. Without a
+			# 'name' row, JS stores the doc at locals[doctype][undefined] instead of
+			# locals[doctype][doctype_name], making frappe.model.get_doc() return
+			# undefined and crashing the form toolbar.
+			frappe.db.set_value(doctype, None, "name", doctype, update_modified=False)
+
 			for fieldname, value in scalar_fields.items():
 				try:
 					frappe.db.set_value(doctype, None, fieldname, value, update_modified=False)
