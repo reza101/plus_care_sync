@@ -966,15 +966,18 @@ class SyncEngine:
 				return
 			remote_data = self._strip_unknown_fields(doctype, remote_data)
 			skip_fields = {"name", "doctype", "modified", "modified_by", "creation", "owner", "docstatus"}
-			# Clear all existing rows for this Single so local exactly mirrors live.
-			# Without this, fields present locally but absent on live are never removed.
+			fields_to_write = {k: v for k, v in remote_data.items() if k not in skip_fields}
+			if not fields_to_write:
+				return
+			# Clear only after confirming we have valid data — deleting before the
+			# check left tabSingles empty when remote returned no writable fields,
+			# causing Frappe boot to read None for critical settings like allow_print_for_draft.
 			frappe.db.sql("DELETE FROM `tabSingles` WHERE doctype = %s", doctype)
-			for fieldname, value in remote_data.items():
-				if fieldname not in skip_fields:
-					try:
-						frappe.db.set_value(doctype, None, fieldname, value, update_modified=False)
-					except Exception as e:
-						self.log_sync_error(doctype, doctype, f"field '{fieldname}': {str(e)}")
+			for fieldname, value in fields_to_write.items():
+				try:
+					frappe.db.set_value(doctype, None, fieldname, value, update_modified=False)
+				except Exception as e:
+					self.log_sync_error(doctype, doctype, f"field '{fieldname}': {str(e)}")
 			frappe.db.commit()
 		except Exception as e:
 			raise Exception(f"Failed to pull single doctype {doctype} from remote: {str(e)}")
