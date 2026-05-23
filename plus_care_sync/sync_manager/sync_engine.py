@@ -56,13 +56,52 @@ _EXPLICIT_INCLUDE_DOCTYPES = {
 	"Number Card",
 }
 
-# Single doctypes that must never be synced — only this app's own config
-# is excluded so that overwriting local connection settings doesn't break sync.
-_SINGLE_SYNC_EXCLUDE = {
-	"Sync Settings",          # this app's own config
+# Single doctypes excluded when pushing LOCAL → LIVE.
+# These hold site-specific config on live that must not be overwritten from local,
+# or are UI tools with mandatory fields that are empty locally.
+_SINGLE_EXCLUDE_PUSH = {
+	"Sync Settings",                     # each site keeps its own remote URL / API keys
+	"Security Settings",                 # does not exist in Frappe v15; live returns HTTP 500
+	"System Health Report",              # all child tables are is_virtual=1 — no DB tables
+	"Payment Reconciliation",            # UI tool, not stored data
+	"System Settings",                   # live may have newer/different system-wide config
+	"S3 Backup Settings",               # live may have real S3 credentials — don't overwrite
+	"Google Drive",                      # site-specific backup config
+	"Customize Form",                    # UI tool — mandatory: fields (table)
+	"Permission Inspector",              # UI tool — mandatory: ref_doctype, user
+	"Bulk Salary Structure Assignment",  # HR tool — mandatory: salary_structure, from_date
+	"Installed Applications",            # lists installed apps; site-specific; has datetime fields
+	"Currency Exchange Settings",        # has datetime fields that differ per site
+	"Pegged Currencies",                 # has datetime fields that differ per site
+	"Navbar Settings",                   # has datetime fields; site-specific UI config
+	"BOM Update Tool",                       # UI tool — replaces BOM in work orders; mandatory: current_bom, new_bom
+	"Quick Stock Balance",                   # UI tool — stock lookup form; mandatory: warehouse, item
+	"Upload Attendance",                     # UI tool — bulk attendance import; mandatory: att_fr_date, att_to_date
+	"SMS Center",                            # UI tool — bulk SMS sender; mandatory: message
+	"Bulk Update",                           # UI tool — mass field update across documents
+	"Data Export",                           # UI tool — CSV/Excel export form; mandatory: doctype
+	"Bank Clearance",                        # UI tool — bank reconciliation form; mandatory: bank account, dates
+	"Opening Invoice Creation Tool",         # UI tool — one-time opening balance wizard
+	"Role Permission for Page and Report",   # UI tool — role assignment for pages/reports
+	"Audit Trail",                           # UI tool — log viewer; read-only on live server
+	"LDAP Settings",                         # site-specific credentials — must never overwrite live
+	"Dropbox Settings",                      # site-specific backup credentials
+	"SMS Settings",                          # site-specific SMS gateway credentials
+	"Appointment Booking Settings",          # site-specific portal config with mandatory fields
+	"Homepage",                              # website config that differs between local and live
+}
+
+# Single doctypes excluded when pulling LIVE → LOCAL.
+# Most importantly Sync Settings — pulling live's remote URL / API key would break
+# the local site's own sync connection.
+_SINGLE_EXCLUDE_PULL = {
+	"Sync Settings",          # must never overwrite local connection settings
 	"Security Settings",      # does not exist in Frappe v15; live returns HTTP 500
-	"System Health Report",   # all child tables are is_virtual=1 — no DB tables exist
-	"Payment Reconciliation", # all child tables are is_virtual=1 — UI tool, not stored data
+	"System Health Report",   # all child tables are is_virtual=1 — no DB tables
+	"Payment Reconciliation", # UI tool, not stored data
+	"Customize Form",         # UI tool — saving empty fields overwrites live customisations
+	"Permission Inspector",   # UI tool — transient state, not persistent config
+	"Installed Applications", # site-specific; pulling live's app list makes no sense locally
 }
 
 # Sync order matters: foundational doctypes must arrive before the records that
@@ -508,13 +547,15 @@ class SyncEngine:
 			# Check if document exists on remote
 			response = requests.get(endpoint, headers=self.get_headers(), timeout=30)
 
-			doc_dict = json.dumps(doc.as_dict(), default=str)
+			payload = doc.as_dict()
 
 			if response.status_code == 200:
-				# Update existing document
+				# Strip modified/modified_by so the live server does not raise
+				# TimestampMismatchError when live has a newer version of this doc.
+				update_payload = {k: v for k, v in payload.items() if k not in ("modified", "modified_by")}
 				response = requests.put(
 					endpoint,
-					data=doc_dict,
+					data=json.dumps(update_payload, default=str),
 					headers=self.get_headers(),
 					timeout=30
 				)
@@ -523,7 +564,7 @@ class SyncEngine:
 				endpoint = f"{self.remote_url}/api/resource/{encoded_doctype}"
 				response = requests.post(
 					endpoint,
-					data=doc_dict,
+					data=json.dumps(payload, default=str),
 					headers=self.get_headers(),
 					timeout=30
 				)
@@ -954,12 +995,17 @@ class SyncEngine:
 		"""Push a Single doctype to the remote server."""
 		try:
 			doc = frappe.get_single(doctype)
-			data = doc.as_dict()
+			payload = doc.as_dict()
+			# Strip modified/modified_by so the live server does not raise
+			# TimestampMismatchError when live has a newer version of this doc.
+			payload.pop("modified", None)
+			payload.pop("modified_by", None)
+			data = json.dumps(payload, default=str)
 			encoded = quote(doctype)
 			endpoint = f"{self.remote_url}/api/resource/{encoded}/{encoded}"
 			response = requests.put(
 				endpoint,
-				json=data,
+				data=data,
 				headers=self.get_headers(),
 				timeout=30
 			)
@@ -1057,13 +1103,13 @@ class SyncEngine:
 		synced = 0
 		for d in all_singles:
 			doctype = d.name
-			if doctype in _SINGLE_SYNC_EXCLUDE:
-				continue
 			try:
 				if direction in ("Local to Live (One Way)", "Bidirectional (Two Way)"):
-					self.push_single_to_remote(doctype)
+					if doctype not in _SINGLE_EXCLUDE_PUSH:
+						self.push_single_to_remote(doctype)
 				if direction in ("Live to Local (One Way)", "Bidirectional (Two Way)"):
-					self.pull_single_from_remote(doctype)
+					if doctype not in _SINGLE_EXCLUDE_PULL:
+						self.pull_single_from_remote(doctype)
 				synced += 1
 			except Exception as e:
 				self.log_sync_error(doctype, doctype, str(e))
@@ -1593,7 +1639,7 @@ def execute_sync():
 		# Update sync status
 		frappe.db.set_value("Sync Settings", "Sync Settings", {
 			"sync_status": "Success",
-			"last_sync_time": datetime.now(),
+			"last_sync_time": frappe.utils.now_datetime(),
 			"total_synced_records": total_synced
 		})
 

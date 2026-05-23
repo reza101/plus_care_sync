@@ -214,6 +214,7 @@ class SyncQueue(Document):
 	def _push_to_remote(self, data):
 		"""Push record to remote server"""
 		import requests
+		from urllib.parse import quote
 
 		settings = frappe.get_single("Sync Settings")
 
@@ -225,18 +226,22 @@ class SyncQueue(Document):
 			"Content-Type": "application/json"
 		}
 
-		endpoint = f"{settings.remote_url}/api/resource/{self.reference_doctype}"
+		encoded_doctype = quote(self.reference_doctype)
+		encoded_name = quote(self.reference_name)
+		endpoint = f"{settings.remote_url}/api/resource/{encoded_doctype}"
+		check_url = f"{endpoint}/{encoded_name}"
+
+		doc_json = json.dumps(data, default=str)
 
 		# Check if exists on remote
-		check_url = f"{endpoint}/{self.reference_name}"
 		response = requests.get(check_url, headers=headers, timeout=30)
 
 		if response.status_code == 200:
 			# Update existing
-			response = requests.put(check_url, json=data, headers=headers, timeout=30)
+			response = requests.put(check_url, data=doc_json, headers=headers, timeout=30)
 		else:
 			# Create new
-			response = requests.post(endpoint, json=data, headers=headers, timeout=30)
+			response = requests.post(endpoint, data=doc_json, headers=headers, timeout=30)
 
 		if response.status_code not in [200, 201]:
 			raise Exception(f"Remote API error: {response.text}")

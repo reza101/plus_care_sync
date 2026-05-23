@@ -157,7 +157,8 @@ def reset_last_sync_time():
 @frappe.whitelist()
 def auto_sync():
 	"""Automatic sync function called by scheduler"""
-	from datetime import datetime, timedelta  # noqa: F811 (shadows module-level import if any)
+	from datetime import timedelta
+	from frappe.utils import now_datetime
 
 	settings = frappe.get_single("Sync Settings")
 
@@ -175,14 +176,15 @@ def auto_sync():
 		}
 
 		interval = frequency_map.get(settings.sync_frequency, 300)
-		now = datetime.now()
+		now = now_datetime()
 
 		if settings.last_sync_time:
 			last = settings.last_sync_time
 			if isinstance(last, str):
 				# Frappe may store datetimes with ISO 'T' separator — normalise to space
 				last = last.replace("T", " ")
-				last = datetime.strptime(last, "%Y-%m-%d %H:%M:%S.%f" if "." in last else "%Y-%m-%d %H:%M:%S")
+				from datetime import datetime as _dt
+				last = _dt.strptime(last, "%Y-%m-%d %H:%M:%S.%f" if "." in last else "%Y-%m-%d %H:%M:%S")
 			if (now - last).total_seconds() < interval:
 				return  # Not enough time has passed since last sync
 
@@ -205,7 +207,7 @@ def auto_sync():
 	elif settings.sync_mode == "Scheduled" and settings.scheduled_time:
 		# Build today's scheduled datetime from the Time field value.
 		# Frappe returns Time fields as datetime.timedelta, not a string.
-		now = datetime.now()
+		now = now_datetime()
 		t = settings.scheduled_time
 		if isinstance(t, timedelta):
 			total_secs = int(t.total_seconds())
@@ -213,7 +215,8 @@ def auto_sync():
 			m, s = divmod(rem, 60)
 		else:
 			# Fallback: parse string value
-			parsed = datetime.strptime(str(t), "%H:%M:%S")
+			from datetime import datetime as _dt
+			parsed = _dt.strptime(str(t), "%H:%M:%S")
 			h, m, s = parsed.hour, parsed.minute, parsed.second
 
 		scheduled = now.replace(hour=h, minute=m, second=s, microsecond=0)
