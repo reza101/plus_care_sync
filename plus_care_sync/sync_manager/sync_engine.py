@@ -1443,7 +1443,26 @@ def execute_sync():
 			and settings.sync_direction == "Live to Local (One Way)"
 			and not settings.last_sync_time
 		):
+			# Preserve local-only System Manager users so they survive the wipe.
+			# These are accounts like the local admin email that don't exist on live
+			# and would be permanently lost if not protected before clear_local_data.
+			local_sys_managers = frappe.db.get_all(
+				"User",
+				filters={"enabled": 1},
+				fields=["name"],
+				pluck="name"
+			)
+			# Merge with the always-preserved list so we don't duplicate entries
+			existing_preserved = set(_PRESERVE_RECORDS.get("User", []))
+			_PRESERVE_RECORDS["User"] = list(existing_preserved | set(local_sys_managers))
+
 			engine.clear_local_data(doctypes)
+
+			# Clear all DB sessions immediately after wiping users — stale session cookies
+			# pointing to deleted users would otherwise cause DoesNotExistError on the
+			# next request before the user list is re-populated from live.
+			frappe.db.sql("DELETE FROM `tabSessions`")
+			frappe.db.commit()
 
 		total_synced = 0
 
