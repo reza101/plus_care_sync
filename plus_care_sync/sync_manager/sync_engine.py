@@ -784,7 +784,7 @@ class SyncEngine:
 
 			# Never overwrite records that must stay local (e.g. Administrator user).
 			# These records are also protected from deletion by _PRESERVE_RECORDS.
-			if name in _PRESERVE_RECORDS.get(doctype, []):
+			if name in SyncEngine._PRESERVE_RECORDS.get(doctype, []):
 				return
 
 			# Some doctypes declare is_tree=1 (e.g. Employee) but the actual DB
@@ -1453,8 +1453,8 @@ def execute_sync():
 				pluck="name"
 			)
 			# Merge with the always-preserved list so we don't duplicate entries
-			existing_preserved = set(_PRESERVE_RECORDS.get("User", []))
-			_PRESERVE_RECORDS["User"] = list(existing_preserved | set(local_sys_managers))
+			existing_preserved = set(SyncEngine._PRESERVE_RECORDS.get("User", []))
+			SyncEngine._PRESERVE_RECORDS["User"] = list(existing_preserved | set(local_sys_managers))
 
 			engine.clear_local_data(doctypes)
 
