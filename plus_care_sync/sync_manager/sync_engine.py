@@ -568,18 +568,8 @@ class SyncEngine:
 					headers=self.get_headers(),
 					timeout=30
 				)
-				# Frappe's insert() sets creation=now_datetime() on the live server
-				# regardless of what's in the payload.  Restore the original timestamps
-				# via a follow-up PUT so the live record matches the local source.
-				if response.status_code in [200, 201]:
-					ts = {}
-					if payload.get("creation"):
-						ts["creation"] = str(payload["creation"])
-					if payload.get("modified"):
-						ts["modified"] = str(payload["modified"])
-					if ts:
-						requests.put(endpoint, data=json.dumps(ts, default=str),
-							headers=self.get_headers(), timeout=30)
+				# Note: Frappe marks `creation` as set_only_once (CannotChangeConstantError),
+				# so we cannot restore the original creation time on the live server via REST.
 
 			if response.status_code not in [200, 201]:
 				raise Exception(f"Remote API error: {response.text}")
@@ -1768,4 +1758,6 @@ def debug_settings_sync():
 		except Exception as e:
 			results[doctype] = {"http_status": "exception", "error": str(e)}
 	return results
+
+
 

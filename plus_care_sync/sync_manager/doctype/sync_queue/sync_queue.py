@@ -249,11 +249,6 @@ class SyncQueue(Document):
 		endpoint = f"{settings.remote_url}/api/resource/{encoded_doctype}"
 		check_url = f"{endpoint}/{encoded_name}"
 
-		# Preserve original timestamps — needed to restore after POST (Frappe sets
-		# creation=now() during insert regardless of what's in the payload).
-		original_creation = data.get("creation")
-		original_modified = data.get("modified")
-
 		doc_json = json.dumps(data, default=str)
 
 		# Check if exists on remote
@@ -265,16 +260,9 @@ class SyncQueue(Document):
 			response = requests.put(check_url, data=json.dumps(update_data, default=str), headers=headers, timeout=30)
 		else:
 			# Create new
+			# Note: Frappe marks creation as set_only_once — creation time on live will
+			# be the sync time, not the original.  This is a Frappe REST API limitation.
 			response = requests.post(endpoint, data=doc_json, headers=headers, timeout=30)
-			# Frappe's insert() overrides creation=now() — restore original timestamps
-			# via a follow-up PUT so the live record matches the local source.
-			if response.status_code in [200, 201] and (original_creation or original_modified):
-				ts_payload = {}
-				if original_creation:
-					ts_payload["creation"] = str(original_creation)
-				if original_modified:
-					ts_payload["modified"] = str(original_modified)
-				requests.put(check_url, data=json.dumps(ts_payload, default=str), headers=headers, timeout=30)
 
 		if response.status_code not in [200, 201]:
 			raise Exception(f"Remote API error: {response.text}")
