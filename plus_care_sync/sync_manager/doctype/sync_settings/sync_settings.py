@@ -106,12 +106,9 @@ class SyncSettings(Document):
 		if not self.enable_sync:
 			frappe.throw(_("Please enable sync first"))
 
-		# Update status
-		self.sync_status = "Syncing"
-		self.save()
-		frappe.db.commit()
-
-		# Enqueue sync job
+		# Do NOT pre-set sync_status here — execute_sync() manages its own status.
+		# Pre-setting "Syncing" before enqueuing causes execute_sync() to see the
+		# guard at startup and bail out immediately, leaving status stuck at "Syncing".
 		frappe.enqueue(
 			"plus_care_sync.sync_manager.sync_engine.execute_sync",
 			queue="long",
