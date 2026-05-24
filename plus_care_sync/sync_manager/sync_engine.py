@@ -998,10 +998,10 @@ class SyncEngine:
 		try:
 			doc = frappe.get_single(doctype)
 			payload = doc.as_dict()
-			# Strip modified/modified_by so the live server does not raise
-			# TimestampMismatchError when live has a newer version of this doc.
-			payload.pop("modified", None)
-			payload.pop("modified_by", None)
+			# Strip server-managed / set_only_once fields so the live server does not
+			# raise TimestampMismatchError or CannotChangeConstantError.
+			for _f in ("modified", "modified_by", "creation", "owner"):
+				payload.pop(_f, None)
 			data = json.dumps(payload, default=str)
 			encoded = quote(doctype)
 			endpoint = f"{self.remote_url}/api/resource/{encoded}/{encoded}"
