@@ -249,17 +249,32 @@ class SyncQueue(Document):
 		endpoint = f"{settings.remote_url}/api/resource/{encoded_doctype}"
 		check_url = f"{endpoint}/{encoded_name}"
 
+		# Preserve original timestamps — needed to restore after POST (Frappe sets
+		# creation=now() during insert regardless of what's in the payload).
+		original_creation = data.get("creation")
+		original_modified = data.get("modified")
+
 		doc_json = json.dumps(data, default=str)
 
 		# Check if exists on remote
 		response = requests.get(check_url, headers=headers, timeout=30)
 
 		if response.status_code == 200:
-			# Update existing
-			response = requests.put(check_url, data=doc_json, headers=headers, timeout=30)
+			# Update existing — strip modified so live doesn't raise TimestampMismatchError
+			update_data = {k: v for k, v in data.items() if k not in ("modified", "modified_by")}
+			response = requests.put(check_url, data=json.dumps(update_data, default=str), headers=headers, timeout=30)
 		else:
 			# Create new
 			response = requests.post(endpoint, data=doc_json, headers=headers, timeout=30)
+			# Frappe's insert() overrides creation=now() — restore original timestamps
+			# via a follow-up PUT so the live record matches the local source.
+			if response.status_code in [200, 201] and (original_creation or original_modified):
+				ts_payload = {}
+				if original_creation:
+					ts_payload["creation"] = str(original_creation)
+				if original_modified:
+					ts_payload["modified"] = str(original_modified)
+				requests.put(check_url, data=json.dumps(ts_payload, default=str), headers=headers, timeout=30)
 
 		if response.status_code not in [200, 201]:
 			raise Exception(f"Remote API error: {response.text}")
