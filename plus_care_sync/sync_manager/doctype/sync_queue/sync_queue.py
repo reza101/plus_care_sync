@@ -128,6 +128,12 @@ class SyncQueue(Document):
 		doctype = self.reference_doctype
 		name = self.reference_name or data.get("name")
 
+		# Preserve original timestamps before stripping them for the ORM.
+		# Frappe's before_insert/on_update hooks reset creation/modified to now()
+		# when these fields are absent; we restore them via raw SQL after the write.
+		original_creation = data.get("creation")
+		original_modified = data.get("modified")
+
 		# Remove fields that must not be copied from live.
 		# lft/rgt/old_parent are nestedset positions local to each server.
 		fields_to_remove = [
@@ -161,6 +167,18 @@ class SyncQueue(Document):
 				doc = frappe.get_doc(data)
 				doc.flags.ignore_permissions = True
 				doc.insert()
+
+		# Restore original creation/modified so the local record matches the source.
+		# Must run after commit-safe point; use update_modified=False to avoid
+		# triggering another modified-timestamp update.
+		record_name = name or self.reference_name
+		if record_name and (original_creation or original_modified):
+			update = {}
+			if original_creation:
+				update["creation"] = original_creation
+			if original_modified:
+				update["modified"] = original_modified
+			frappe.db.set_value(doctype, record_name, update, update_modified=False)
 
 		frappe.db.commit()
 
