@@ -477,13 +477,17 @@ class SyncEngine:
 		In full-sync mode pages are fetched lazily until exhausted so memory
 		usage stays constant at one batch regardless of doctype size.
 		"""
+		meta = frappe.get_meta(doctype)
+		# Tree doctypes must be pushed parents-first so children never arrive at
+		# the remote before their parent exists (avoids LinkValidationError).
+		order_by = "lft asc" if meta.get("is_tree") else "modified desc"
 		start = 0
 		while True:
 			page = frappe.get_all(
 				doctype,
 				filters=filters,
 				fields=["name", "modified"],
-				order_by="modified desc",
+				order_by=order_by,
 				limit_start=start,
 				limit_page_length=batch_size,
 			)
@@ -539,6 +543,16 @@ class SyncEngine:
 	def push_to_remote(self, doc):
 		"""Push document to remote server"""
 		try:
+			# Root nodes of tree doctypes are auto-created by ERPNext on company setup
+			# and cannot be pushed: they either raise RootNotEditable (if they exist on
+			# remote) or NestedSetRecursionError / MandatoryError (if they don't).
+			meta = frappe.get_meta(doc.doctype)
+			if meta.get("is_tree"):
+				parent_field = f"parent_{frappe.scrub(doc.doctype)}"
+				parent_val = doc.get(parent_field)
+				if not parent_val or parent_val == doc.name:
+					return  # root node — skip silently
+
 			# URL encode doctype and name for API call
 			encoded_doctype = quote(doc.doctype)
 			encoded_name = quote(doc.name)
@@ -550,9 +564,9 @@ class SyncEngine:
 			payload = doc.as_dict()
 
 			if response.status_code == 200:
-				# Strip modified/modified_by so the live server does not raise
-				# TimestampMismatchError when live has a newer version of this doc.
-				update_payload = {k: v for k, v in payload.items() if k not in ("modified", "modified_by")}
+				# Strip server-managed / set_only_once fields so the live server does not
+				# raise TimestampMismatchError or CannotChangeConstantError on update.
+				update_payload = {k: v for k, v in payload.items() if k not in ("modified", "modified_by", "creation", "owner")}
 				response = requests.put(
 					endpoint,
 					data=json.dumps(update_payload, default=str),
@@ -572,6 +586,14 @@ class SyncEngine:
 				# so we cannot restore the original creation time on the live server via REST.
 
 			if response.status_code not in [200, 201]:
+				# Some tree errors are never recoverable via REST — skip them silently
+				# rather than logging hundreds of identical failures.
+				try:
+					exc_type = response.json().get("exc_type", "")
+				except Exception:
+					exc_type = ""
+				if exc_type in {"RootNotEditable", "NestedSetRecursionError"}:
+					return
 				raise Exception(f"Remote API error: {response.text}")
 
 		except Exception as e:
