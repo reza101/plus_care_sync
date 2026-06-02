@@ -1201,6 +1201,9 @@ class SyncEngine:
 	# would break the local site's authentication and admin access.
 	_PRESERVE_RECORDS = {
 		"User": ["Administrator", "Guest"],
+		# Frappe always expects "Welcome Workspace" to exist at boot — if live has deleted
+		# or renamed it, the local site crashes with DoesNotExistError on every page load.
+		"Workspace": ["Welcome Workspace"],
 	}
 
 	def clear_local_data(self, doctypes):
