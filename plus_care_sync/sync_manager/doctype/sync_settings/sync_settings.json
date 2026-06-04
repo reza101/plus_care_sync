@@ -39,6 +39,7 @@
   "test_connection",
   "sync_status_section",
   "last_sync_time",
+  "sync_started_at",
   "reset_last_sync_time",
   "sync_status",
   "column_break_4",
@@ -250,6 +251,12 @@
    "fieldname": "last_sync_time",
    "fieldtype": "Datetime",
    "label": "Last Sync Time",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sync_started_at",
+   "fieldtype": "Datetime",
+   "label": "Sync Started At",
    "read_only": 1
   },
   {

@@ -369,6 +369,11 @@ _EXCLUDED_DOCTYPES = {
 	# content. Letting the main loop process File creates DB records without
 	# file content, then sync_files() skips them because db.exists() is True.
 	"File",
+	# Frappe core website infrastructure — "Standard Navbar", "Standard Footer",
+	# etc. are fixtures installed by bench migrate. Syncing or clearing these
+	# causes DoesNotExistError on every subsequent web page render.
+	"Web Template",
+	"Web Template Field",
 }
 
 
@@ -1472,6 +1477,41 @@ class SyncEngine:
 		if response.status_code not in [200, 201]:
 			raise Exception(f"Upload failed: {response.text[:200]}")
 
+	def rebuild_bin_from_sle(self):
+		"""Rebuild Bin actual_qty from Stock Ledger Entries after a raw-SQL sync.
+
+		Raw SQL writes bypass ERPNext hooks that normally keep Bin in sync with SLE.
+		SUM(actual_qty) over SLE gives the correct current balance because SLE.actual_qty
+		is always the signed delta (positive = receipt, negative = issue).
+		"""
+		try:
+			sle_totals = frappe.db.sql("""
+				SELECT item_code, warehouse, SUM(actual_qty) AS qty
+				FROM `tabStock Ledger Entry`
+				WHERE docstatus = 1
+				GROUP BY item_code, warehouse
+			""", as_dict=True)
+
+			for row in sle_totals:
+				bin_name = frappe.db.get_value(
+					"Bin", {"item_code": row.item_code, "warehouse": row.warehouse}, "name"
+				)
+				if bin_name:
+					frappe.db.set_value("Bin", bin_name, "actual_qty", row.qty, update_modified=False)
+				else:
+					frappe.db.sql("""
+						INSERT INTO `tabBin`
+							(name, item_code, warehouse, actual_qty,
+							 modified, creation, modified_by, owner, docstatus)
+						VALUES (%s, %s, %s, %s, NOW(), NOW(), 'Administrator', 'Administrator', 0)
+					""", (frappe.generate_hash(length=10), row.item_code, row.warehouse, row.qty))
+
+			frappe.db.commit()
+			return len(sle_totals)
+		except Exception as e:
+			self.log_sync_error("Bin", None, f"rebuild_bin_from_sle failed: {str(e)}")
+			return 0
+
 	def log_sync_error(self, doctype, docname, error):
 		"""Log sync errors"""
 		try:
@@ -1498,13 +1538,44 @@ def execute_sync():
 			return {"status": "error", "message": "Sync is not enabled"}
 
 		if settings.sync_status == "Syncing":
-			return {"status": "error", "message": "Sync already in progress"}
+			# Auto-expire a stale "Syncing" lock — if the worker was killed (OOM,
+			# timeout, server restart) the status never resets on its own.
+			# Allow a new run after 2 hours so sync is never permanently blocked.
+			started_at = settings.sync_started_at
+			if started_at:
+				from frappe.utils import now_datetime as _now
+				stale = (_now() - _parse_dt(started_at)).total_seconds() > 7200
+			else:
+				stale = True  # no start timestamp → treat as stale
+			if not stale:
+				return {"status": "error", "message": "Sync already in progress"}
 
-		# Update status
-		frappe.db.set_value("Sync Settings", "Sync Settings", "sync_status", "Syncing")
+		# Update status and record when this run started
+		frappe.db.set_value("Sync Settings", "Sync Settings", {
+			"sync_status": "Syncing",
+			"sync_started_at": frappe.utils.now_datetime(),
+		})
 		frappe.db.commit()
 
 		engine = SyncEngine()
+
+		# Abort early if remote is unreachable — avoids flooding Sync Log with
+		# hundreds of identical timeout errors (one per doctype).
+		try:
+			probe = requests.get(
+				f"{engine.remote_url}/api/method/frappe.auth.get_logged_user",
+				headers=engine.get_headers(),
+				timeout=10,
+			)
+			if probe.status_code not in (200, 401, 403):
+				raise Exception(f"HTTP {probe.status_code}")
+		except Exception as e:
+			frappe.db.set_value("Sync Settings", "Sync Settings", "sync_status", "Error")
+			frappe.db.commit()
+			frappe.log_error(f"Sync aborted: remote unreachable — {e}", "Plus Care Sync")
+			engine.log_sync_error("Connection", None, f"Remote server unreachable: {e}")
+			return {"status": "error", "message": f"Remote server unreachable: {e}"}
+
 		doctypes = engine.get_doctypes_to_sync()
 
 		# Full Database + Live→Local + no last_sync_time (initial/reset full sync):
@@ -1662,6 +1733,25 @@ def execute_sync():
 				frappe.db.commit()
 		except Exception as e:
 			engine.log_sync_error("tabSeries", None, str(e))
+
+		# Rebuild Bin from SLE — raw SQL writes bypass ERPNext hooks so Bin never
+		# gets updated automatically; without this, Item master shows zero stock
+		# even when Stock Balance report (which reads SLE) is correct.
+		if settings.sync_direction in ("Live to Local (One Way)", "Bidirectional (Two Way)"):
+			try:
+				bin_count = engine.rebuild_bin_from_sle()
+				sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
+				frappe.get_doc({
+					"doctype": "Sync Log",
+					"sync_type": sync_type,
+					"doctype_name": "Bin",
+					"status": "Success",
+					"records_synced": bin_count,
+					"sync_details": "Bin rebuilt from Stock Ledger Entries"
+				}).insert(ignore_permissions=True)
+				frappe.db.commit()
+			except Exception as e:
+				engine.log_sync_error("Bin", None, str(e))
 
 		# Update sync status
 		frappe.db.set_value("Sync Settings", "Sync Settings", {
