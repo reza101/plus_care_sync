@@ -8,6 +8,38 @@ from frappe import _
 from frappe.utils import now_datetime
 
 
+def _advance_series_counter(naming_series, doc_name):
+	"""Advance tabSeries counter so doc_name is never re-used as a new document name.
+
+	Derives the prefix from the document name itself by stripping the trailing
+	digits that correspond to the # placeholders in naming_series.
+	"""
+	try:
+		num_digits = len(naming_series) - len(naming_series.rstrip("#"))
+		if num_digits == 0 or len(doc_name) < num_digits:
+			return
+		suffix_str = doc_name[-num_digits:]
+		try:
+			counter = int(suffix_str)
+		except ValueError:
+			return
+		prefix = doc_name[:-num_digits]
+		if not prefix:
+			return
+		exists = frappe.db.sql("SELECT current FROM `tabSeries` WHERE name = %s", prefix)
+		if exists:
+			if (exists[0][0] or 0) < counter:
+				frappe.db.sql(
+					"UPDATE `tabSeries` SET current = %s WHERE name = %s", (counter, prefix)
+				)
+		else:
+			frappe.db.sql(
+				"INSERT INTO `tabSeries` (name, current) VALUES (%s, %s)", (prefix, counter)
+			)
+	except Exception:
+		pass
+
+
 class SyncQueue(Document):
 	def before_insert(self):
 		"""Set default values"""
@@ -127,6 +159,7 @@ class SyncQueue(Document):
 
 		doctype = self.reference_doctype
 		name = self.reference_name or data.get("name")
+		naming_series = data.get("naming_series")
 
 		# Preserve original timestamps before stripping them for the ORM.
 		# Frappe's before_insert/on_update hooks reset creation/modified to now()
@@ -179,6 +212,11 @@ class SyncQueue(Document):
 			if original_modified:
 				update["modified"] = original_modified
 			frappe.db.set_value(doctype, record_name, update, update_modified=False)
+
+		# Advance the naming series counter so the next locally-created document
+		# doesn't collide with the one we just published from the queue.
+		if naming_series and record_name:
+			_advance_series_counter(naming_series, record_name)
 
 		frappe.db.commit()
 
