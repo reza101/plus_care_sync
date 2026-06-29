@@ -8,6 +8,7 @@
   "general_settings",
   "enable_sync",
   "sync_mode",
+  "branch_id",
   "column_break_1",
   "sync_frequency",
   "scheduled_time",
@@ -48,6 +49,7 @@
   "sync_actions_section",
   "sync_now",
   "view_sync_logs",
+  "setup_branch_naming_series",
   "advanced_section",
   "batch_size",
   "retry_failed",
@@ -73,6 +75,13 @@
    "fieldtype": "Select",
    "label": "Sync Mode",
    "options": "Manual\nAutomatic\nScheduled"
+  },
+  {
+   "description": "Unique prefix for this branch (e.g. A, B, C). Used in naming series to prevent document name conflicts across branches.",
+   "fieldname": "branch_id",
+   "fieldtype": "Data",
+   "label": "Branch ID",
+   "length": 5
   },
   {
    "fieldname": "column_break_1",
@@ -305,6 +314,13 @@
    "fieldname": "view_sync_logs",
    "fieldtype": "Button",
    "label": "View Sync Logs"
+  },
+  {
+   "depends_on": "eval:doc.branch_id",
+   "description": "Adds branch prefix to naming series of all submittable doctypes to prevent name conflicts with other branches on the central server.",
+   "fieldname": "setup_branch_naming_series",
+   "fieldtype": "Button",
+   "label": "Setup Branch Naming Series"
   },
   {
    "collapsible": 1,

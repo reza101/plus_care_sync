@@ -534,10 +534,14 @@ class SyncEngine:
 
 					# FIX 1: Mark this record as pushed so pull_from_remote skips it
 					self._pushed_this_session.setdefault(doctype, set()).add(record.name)
+					# Clear any previous retry entry for this record — it succeeded now
+					self._clear_retry(doctype, record.name)
 					synced_count += 1
 
 				except Exception as e:
 					self.log_sync_error(doctype, record.name, str(e))
+					# Store failed record so next sync run retries it regardless of last_sync_time
+					self._add_to_retry(doctype, record.name)
 
 			return synced_count
 
@@ -545,12 +549,40 @@ class SyncEngine:
 			self.log_sync_error(doctype, None, str(e))
 			return 0
 
-	def push_to_remote(self, doc):
-		"""Push document to remote server"""
+	def _do_push(self, doc, payload):
+		"""Push a document to the remote via the plus_care_sync receiver endpoint.
+
+		The receiver (plus_care_sync.api.receive.upsert_document) inserts with
+		ignore_links=True and handles docstatus transitions (draft→submit→cancel)
+		server-side.  This tolerates not-yet-synced and circular references
+		(e.g. Purchase Invoice ⇄ Payment Entry) that the standard REST resource
+		API would reject with LinkValidationError.
+
+		Returns the requests.Response so the caller can inspect the status code.
+		"""
+		body = {
+			"doctype": doc.doctype,
+			"name": doc.name,
+			"data": json.dumps(payload, default=str),
+			"target_docstatus": int(payload.get("docstatus") or 0),
+		}
+		return requests.post(
+			f"{self.remote_url}/api/method/plus_care_sync.api.receive.upsert_document",
+			data=json.dumps(body),
+			headers=self.get_headers(),
+			timeout=120,
+		)
+
+	def push_to_remote(self, doc, _retry=True):
+		"""Push document to remote server via the receiver endpoint.
+
+		Link validation is bypassed on the receiving side, so missing or
+		circular references no longer block the push — they resolve as the
+		referenced documents arrive in subsequent syncs (eventual consistency).
+		"""
 		try:
-			# Root nodes of tree doctypes are auto-created by ERPNext on company setup
-			# and cannot be pushed: they either raise RootNotEditable (if they exist on
-			# remote) or NestedSetRecursionError / MandatoryError (if they don't).
+			# Root nodes of tree doctypes are auto-created by ERPNext on company
+			# setup and cannot be pushed: the receiver would raise on submit/save.
 			meta = frappe.get_meta(doc.doctype)
 			if meta.get("is_tree"):
 				parent_field = f"parent_{frappe.scrub(doc.doctype)}"
@@ -558,47 +590,20 @@ class SyncEngine:
 				if not parent_val or parent_val == doc.name:
 					return  # root node — skip silently
 
-			# URL encode doctype and name for API call
-			encoded_doctype = quote(doc.doctype)
-			encoded_name = quote(doc.name)
-			endpoint = f"{self.remote_url}/api/resource/{encoded_doctype}/{encoded_name}"
-
-			# Check if document exists on remote
-			response = requests.get(endpoint, headers=self.get_headers(), timeout=30)
-
 			payload = doc.as_dict()
-
-			if response.status_code == 200:
-				# Strip server-managed / set_only_once fields so the live server does not
-				# raise TimestampMismatchError or CannotChangeConstantError on update.
-				update_payload = {k: v for k, v in payload.items() if k not in ("modified", "modified_by", "creation", "owner")}
-				response = requests.put(
-					endpoint,
-					data=json.dumps(update_payload, default=str),
-					headers=self.get_headers(),
-					timeout=30
-				)
-			else:
-				# Create new document
-				create_endpoint = f"{self.remote_url}/api/resource/{encoded_doctype}"
-				response = requests.post(
-					create_endpoint,
-					data=json.dumps(payload, default=str),
-					headers=self.get_headers(),
-					timeout=30
-				)
-				# Note: Frappe marks `creation` as set_only_once (CannotChangeConstantError),
-				# so we cannot restore the original creation time on the live server via REST.
+			response = self._do_push(doc, payload)
 
 			if response.status_code not in [200, 201]:
-				# Some tree errors are never recoverable via REST — skip them silently
-				# rather than logging hundreds of identical failures.
 				try:
-					exc_type = response.json().get("exc_type", "")
+					resp_json = response.json()
+					exc_type = resp_json.get("exc_type", "")
 				except Exception:
 					exc_type = ""
+
+				# Tree root errors — never recoverable, skip silently.
 				if exc_type in {"RootNotEditable", "NestedSetRecursionError"}:
 					return
+
 				raise Exception(f"Remote API error: {response.text}")
 
 		except Exception as e:
@@ -831,6 +836,53 @@ class SyncEngine:
 
 		return cleaned
 
+	def _apply_submitted_doc(self, doctype, name, data):
+		"""Insert a submitted document as draft then submit via ERPNext's own mechanism.
+
+		This is the correct way to sync submittable documents (Stock Entry, Sales Invoice,
+		Purchase Invoice, etc.) to a remote ERPNext instance.  ERPNext's submit() call
+		creates Stock Ledger Entries, GL Entries, and updates Bin automatically — no raw
+		SQL or rebuild_bin needed.
+
+		Falls back to _write_doc_directly if submit raises an unrecoverable error
+		(e.g. a linked document is missing on the receiving side).
+		"""
+		# Skip if already submitted or cancelled locally — nothing to do.
+		if frappe.db.exists(doctype, name):
+			existing_status = frappe.db.get_value(doctype, name, "docstatus")
+			if existing_status in (1, 2):
+				return
+
+		try:
+			if not frappe.db.exists(doctype, name):
+				# Step 1: insert as Draft so validation runs in a controlled way
+				draft = self._strip_unknown_fields(doctype, dict(data))
+				draft["docstatus"] = 0
+				doc = frappe.get_doc(draft)
+				doc.flags.from_sync = True
+				doc.flags.ignore_links = True
+				doc.flags.ignore_mandatory = True
+				doc.insert(ignore_permissions=True)
+				frappe.db.commit()
+
+			# Step 2: Submit — ERPNext creates SLE / GL / updates Bin automatically ✅
+			doc = frappe.get_doc(doctype, name)
+			doc.flags.from_sync = True
+			doc.flags.ignore_links = True
+			doc.submit()
+			frappe.db.commit()
+
+		except Exception as e:
+			# Fallback: raw SQL so the record at least lands locally even if
+			# SLE/GL can't be created (e.g. missing warehouse or linked doc).
+			frappe.log_error(
+				f"Plus Care Sync — draft→submit failed for {doctype}/{name}: {e}\n"
+				"Falling back to raw SQL insert.",
+				"Plus Care Sync"
+			)
+			is_new = not frappe.db.exists(doctype, name)
+			self._write_doc_directly(doctype, name, data, is_new=is_new)
+
 	def update_local_record(self, doctype, remote_data, skip_rebuild=False):
 		"""Update local record with remote data.
 
@@ -848,9 +900,17 @@ class SyncEngine:
 			remote_data = self._strip_unknown_fields(doctype, remote_data)
 
 			meta = frappe.get_meta(doctype)
+			name = remote_data.get("name")
+			remote_docstatus = int(remote_data.get("docstatus") or 0)
+
+			# Use draft→submit for submitted documents so ERPNext creates SLE/GL/Bin
+			# naturally — this replaces the old raw SQL path for submittable docs.
+			if meta.get("is_submittable") and remote_docstatus == 1:
+				self._apply_submitted_doc(doctype, name, remote_data)
+				return
+
 			is_tree = bool(meta.get("is_tree"))
 			parent_field = f"parent_{frappe.scrub(doctype)}" if is_tree else None
-			name = remote_data.get("name")
 
 			# Never overwrite records that must stay local (e.g. Administrator user).
 			# These records are also protected from deletion by _PRESERVE_RECORDS.
@@ -1565,6 +1625,83 @@ class SyncEngine:
 			self.log_sync_error("Bin", None, f"rebuild_bin_from_sle failed: {str(e)}")
 			return 0
 
+	def _add_to_retry(self, doctype, docname):
+		"""Mark a failed outgoing record for retry on the next sync run.
+
+		Uses Sync Queue with status='Failed' as a persistent retry list.
+		Records stay here until they succeed or are manually rejected.
+		"""
+		try:
+			existing = frappe.db.exists("Sync Queue", {
+				"reference_doctype": doctype,
+				"reference_name": docname,
+				"sync_direction": "Outgoing (Local → Live)",
+				"status": ["in", ["Pending", "Failed"]],
+			})
+			if not existing:
+				frappe.get_doc({
+					"doctype": "Sync Queue",
+					"reference_doctype": doctype,
+					"reference_name": docname,
+					"sync_direction": "Outgoing (Local → Live)",
+					"status": "Failed",
+				}).insert(ignore_permissions=True)
+				frappe.db.commit()
+		except Exception:
+			pass
+
+	def _clear_retry(self, doctype, docname):
+		"""Remove a record from the retry queue after a successful push."""
+		try:
+			queue_name = frappe.db.exists("Sync Queue", {
+				"reference_doctype": doctype,
+				"reference_name": docname,
+				"sync_direction": "Outgoing (Local → Live)",
+				"status": ["in", ["Pending", "Failed"]],
+			})
+			if queue_name:
+				frappe.db.set_value("Sync Queue", queue_name, "status", "Published")
+				frappe.db.commit()
+		except Exception:
+			pass
+
+	def retry_failed_pushes(self):
+		"""Push all records sitting in the Failed retry queue.
+
+		Called at the start of every sync run so records that previously failed
+		(and are now older than last_sync_time) are not silently skipped.
+		Returns the number of records successfully retried.
+		"""
+		failed = frappe.get_all(
+			"Sync Queue",
+			filters={
+				"sync_direction": "Outgoing (Local → Live)",
+				"status": "Failed",
+			},
+			fields=["name", "reference_doctype", "reference_name"],
+		)
+		if not failed:
+			return 0
+
+		retried = 0
+		for item in failed:
+			doctype = item.reference_doctype
+			docname = item.reference_name
+			try:
+				if not frappe.db.exists(doctype, docname):
+					# Record deleted locally — remove from retry queue
+					frappe.db.set_value("Sync Queue", item.name, "status", "Rejected")
+					frappe.db.commit()
+					continue
+				doc = frappe.get_doc(doctype, docname)
+				self.push_to_remote(doc)
+				frappe.db.set_value("Sync Queue", item.name, "status", "Published")
+				frappe.db.commit()
+				retried += 1
+			except Exception as e:
+				self.log_sync_error(doctype, docname, f"Retry failed: {e}")
+		return retried
+
 	def log_sync_error(self, doctype, docname, error):
 		"""Log sync errors"""
 		try:
@@ -1662,6 +1799,26 @@ def execute_sync():
 			frappe.db.commit()
 
 		total_synced = 0
+
+		# Retry records that failed in previous sync runs.
+		# These are older than last_sync_time so the incremental filter would skip them.
+		if settings.sync_direction in ["Local to Live (One Way)", "Bidirectional (Two Way)"]:
+			try:
+				retried = engine.retry_failed_pushes()
+				if retried:
+					sync_type = "Manual" if settings.sync_mode == "Manual" else "Automatic"
+					frappe.get_doc({
+						"doctype": "Sync Log",
+						"sync_type": sync_type,
+						"doctype_name": "Retry Queue",
+						"status": "Success",
+						"records_synced": retried,
+						"sync_details": f"Re-pushed {retried} previously failed records"
+					}).insert(ignore_permissions=True)
+					frappe.db.commit()
+					total_synced += retried
+			except Exception as e:
+				engine.log_sync_error("Retry Queue", None, str(e))
 
 		for doctype in doctypes:
 			try:

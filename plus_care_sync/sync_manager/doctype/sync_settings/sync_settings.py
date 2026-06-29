@@ -123,6 +123,94 @@ class SyncSettings(Document):
 		"""Redirect to sync logs"""
 		frappe.set_route("List", "Sync Log")
 
+	@frappe.whitelist()
+	def setup_branch_naming_series(self):
+		"""Add branch-prefixed naming series to all submittable doctypes.
+
+		Reads the CURRENT naming series for each doctype (English, Arabic, or any
+		language) and adds a branch-prefixed copy.  Prevents document name collisions
+		when documents from multiple branches are synced to the central server.
+
+		Example — current series:  فاتورة-.YYYY.-.####
+		          new series added: فاتورة-A-.YYYY.-.####
+
+		Run once per branch after setting Branch ID.
+		"""
+		branch_id = (self.branch_id or "").strip().upper()
+		if not branch_id:
+			frappe.throw(_("Please set Branch ID before running this setup."))
+
+		marker = f"-{branch_id}-"
+
+		# Fetch all submittable non-single doctypes that have a naming series
+		submittable = frappe.get_all(
+			"DocType",
+			filters={"is_submittable": 1, "issingle": 0},
+			fields=["name", "autoname"],
+		)
+
+		updated = []
+		skipped = []
+
+		for row in submittable:
+			doctype = row.name
+			autoname = (row.autoname or "").strip()
+
+			if not autoname:
+				continue  # No naming series defined — skip
+
+			# Split existing options (newline-separated in ERPNext)
+			existing_options = [s.strip() for s in autoname.split("\n") if s.strip()]
+			new_options = []
+			added_any = False
+
+			for series in existing_options:
+				new_options.append(series)  # Keep the original
+
+				if marker in series:
+					continue  # Already has this branch prefix
+
+				# Insert branch_id after the first segment (before first dash)
+				# Works for any language: "فاتورة-.####" → "فاتورة-A-.####"
+				parts = series.split("-", 1)
+				if len(parts) == 2:
+					prefixed = f"{parts[0]}{marker}{parts[1]}"
+				else:
+					prefixed = f"{series}{marker}.####"
+
+				new_options.append(prefixed)
+				added_any = True
+
+			if not added_any:
+				skipped.append(doctype)
+				continue
+
+			try:
+				frappe.db.set_value(
+					"DocType", doctype, "autoname",
+					"\n".join(new_options),
+					update_modified=False,
+				)
+				updated.append(doctype)
+			except Exception as e:
+				frappe.log_error(f"setup_branch_naming_series: {doctype}: {e}", "Plus Care Sync")
+
+		frappe.db.commit()
+
+		msg_parts = []
+		if updated:
+			msg_parts.append(_("Branch prefix '{0}' added for {1} doctypes.").format(
+				branch_id, len(updated)
+			))
+		if skipped:
+			msg_parts.append(_("{0} doctypes already had the prefix.").format(len(skipped)))
+
+		frappe.msgprint(
+			" ".join(msg_parts) or _("No changes needed."),
+			indicator="green" if updated else "blue",
+			title=_("Branch Naming Series Setup"),
+		)
+
 
 @frappe.whitelist()
 def reset_last_sync_time():

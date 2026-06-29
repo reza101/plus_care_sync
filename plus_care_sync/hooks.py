@@ -148,6 +148,12 @@ app_license = "mit"
 # Scheduled Tasks
 # ---------------
 
+doc_events = {
+	"*": {
+		"before_insert": "plus_care_sync.api.naming.apply_branch_prefix",
+	}
+}
+
 scheduler_events = {
 	"cron": {
 		"*/5 * * * *": [
