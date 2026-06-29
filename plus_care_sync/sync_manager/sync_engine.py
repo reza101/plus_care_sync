@@ -573,12 +573,44 @@ class SyncEngine:
 			timeout=120,
 		)
 
+	def _push_serial_batch_bundles(self, doc):
+		"""Pre-push Serial and Batch Bundle documents referenced in items rows.
+
+		ignore_links=True bypasses link validation but NOT business logic inside
+		submit(): ERPNext physically calls frappe.get_doc("Serial and Batch Bundle",
+		name) during stock processing, so the bundle must exist on remote BEFORE
+		the parent document is submitted.  Serial and Batch Bundle has no back-
+		reference to its parent, so there is no circular dependency here.
+		"""
+		for item in (doc.get("items") or []):
+			bundle_name = item.get("serial_and_batch_bundle")
+			if not bundle_name:
+				continue
+			if not frappe.db.exists("Serial and Batch Bundle", bundle_name):
+				self.log_sync_error(
+					"Serial and Batch Bundle", bundle_name,
+					"bundle missing locally — parent document submit on remote will likely fail",
+				)
+				continue
+			try:
+				bundle_doc = frappe.get_doc("Serial and Batch Bundle", bundle_name)
+				self._do_push(bundle_doc, bundle_doc.as_dict())
+			except Exception as e:
+				self.log_sync_error(
+					"Serial and Batch Bundle", bundle_name,
+					f"pre-push bundle failed: {e}",
+				)
+
 	def push_to_remote(self, doc, _retry=True):
 		"""Push document to remote server via the receiver endpoint.
 
 		Link validation is bypassed on the receiving side, so missing or
-		circular references no longer block the push — they resolve as the
-		referenced documents arrive in subsequent syncs (eventual consistency).
+		circular references (e.g. Purchase Invoice ⇄ Payment Entry) no longer
+		block the push — they resolve in subsequent syncs.
+
+		Serial and Batch Bundle is a hard dependency at the business-logic level
+		(ERPNext loads it during submit stock processing), so it is pre-pushed
+		explicitly before the parent document.
 		"""
 		try:
 			# Root nodes of tree doctypes are auto-created by ERPNext on company
@@ -591,6 +623,11 @@ class SyncEngine:
 					return  # root node — skip silently
 
 			payload = doc.as_dict()
+
+			# Serial and Batch Bundle must exist on remote before submit() runs.
+			if int(payload.get("docstatus") or 0) >= 1:
+				self._push_serial_batch_bundles(doc)
+
 			response = self._do_push(doc, payload)
 
 			if response.status_code not in [200, 201]:
