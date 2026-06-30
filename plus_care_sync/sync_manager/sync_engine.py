@@ -579,16 +579,29 @@ class SyncEngine:
 			timeout=120,
 		)
 
+	def _push_doc_as_draft(self, doctype, name):
+		"""Push a single master document as draft, logging but not raising on failure."""
+		if not frappe.db.exists(doctype, name):
+			return
+		try:
+			d = frappe.get_doc(doctype, name)
+			resp = self._do_push(d, d.as_dict(), target_docstatus=0)
+			if resp.status_code not in (200, 201):
+				self.log_sync_error(doctype, name, f"pre-push failed ({resp.status_code}): {resp.text}")
+		except Exception as e:
+			self.log_sync_error(doctype, name, f"pre-push failed: {e}")
+
 	def _push_serial_batch_bundles(self, doc):
-		"""Pre-push Serial and Batch Bundle documents referenced in items rows AS DRAFT.
+		"""Pre-push Serial and Batch Bundle documents (and their Batch / Serial No
+		dependencies) AS DRAFT before the parent submitted document is pushed.
 
-		The bundle must exist on remote BEFORE the parent document is submitted
-		because ERPNext physically loads it during stock processing (not just via
-		_validate_links).  We push with target_docstatus=0 (draft) so the receiver
-		only needs to INSERT and commit — no escalation attempt, no risk of the
-		insert being rolled back due to a failed submit.
-
-		The bundle will be escalated to Submitted in its own sync_doctype run.
+		ERPNext physically loads bundles, batches, and serial numbers during
+		on_submit stock processing — they must exist on remote before submit() runs.
+		Push order within this method:
+		  1. Batch / Serial No records referenced in bundle entries
+		  2. The bundle itself
+		The parent voucher (invoice) is pushed as Draft BEFORE this method is called
+		(phase-1 in push_to_remote) so that bundle's validate_voucher_no can find it.
 		"""
 		for item in (doc.get("items") or []):
 			bundle_name = item.get("serial_and_batch_bundle")
@@ -602,8 +615,16 @@ class SyncEngine:
 				continue
 			try:
 				bundle_doc = frappe.get_doc("Serial and Batch Bundle", bundle_name)
-				# Push as draft only: receiver inserts + commits, no escalation.
-				# A failed submit would roll back the insert; draft-only avoids that.
+
+				# Pre-push Batch and Serial No records referenced in bundle entries
+				# so ERPNext's on_submit stock processing can find them.
+				for entry in (bundle_doc.get("entries") or []):
+					if entry.get("batch_no"):
+						self._push_doc_as_draft("Batch", entry.batch_no)
+					if entry.get("serial_no"):
+						self._push_doc_as_draft("Serial No", entry.serial_no)
+
+				# Push the bundle itself as draft.
 				resp = self._do_push(bundle_doc, bundle_doc.as_dict(), target_docstatus=0)
 				if resp.status_code not in (200, 201):
 					self.log_sync_error(
