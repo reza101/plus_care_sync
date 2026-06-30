@@ -95,6 +95,7 @@ def _set_sync_flags(doc):
 	doc.flags.ignore_links = True
 	doc.flags.ignore_mandatory = True
 	doc.flags.ignore_permissions = True
+	doc.flags.ignore_validate = True
 
 
 def _escalate(doc, current, target):
