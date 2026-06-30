@@ -623,9 +623,18 @@ class SyncEngine:
 		circular references (e.g. Purchase Invoice ⇄ Payment Entry) no longer
 		block the push — they resolve in subsequent syncs.
 
-		Serial and Batch Bundle is a hard dependency at the business-logic level
-		(ERPNext loads it during submit stock processing), so it is pre-pushed
-		explicitly before the parent document.
+		For submitted documents that reference Serial and Batch Bundles we use a
+		three-phase push to break the circular dependency between invoice and bundle:
+
+		  Phase 1 — push the invoice as DRAFT (target_docstatus=0).
+		            The invoice now exists on remote so bundle's before_insert can
+		            find its voucher_no without raising DoesNotExistError.
+		  Phase 2 — push the bundle(s) as DRAFT.
+		            insert() succeeds because the voucher already exists.
+		  Phase 3 — push the invoice again as SUBMITTED (target_docstatus=1).
+		            upsert_document sees docstatus=0 < target=1, escalates via
+		            _safe_escalate → doc.submit().  ERPNext finds the bundle,
+		            submits it as part of on_submit, creates SLEs / GL entries.
 		"""
 		try:
 			# Root nodes of tree doctypes are auto-created by ERPNext on company
@@ -638,12 +647,17 @@ class SyncEngine:
 					return  # root node — skip silently
 
 			payload = doc.as_dict()
+			docstatus = int(payload.get("docstatus") or 0)
 
-			# Serial and Batch Bundle must exist on remote before submit() runs.
-			if int(payload.get("docstatus") or 0) >= 1:
+			if docstatus >= 1:
+				# Phase 1: push invoice as draft so bundles can reference the voucher
+				self._do_push(doc, payload, target_docstatus=0)
+				# Phase 2: push bundles (voucher draft now exists on remote)
 				self._push_serial_batch_bundles(doc)
-
-			response = self._do_push(doc, payload)
+				# Phase 3: push invoice as submitted (escalate draft → submitted)
+				response = self._do_push(doc, payload)
+			else:
+				response = self._do_push(doc, payload)
 
 			if response.status_code not in [200, 201]:
 				try:
