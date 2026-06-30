@@ -63,7 +63,7 @@ def upsert_document(doctype, name, data, target_docstatus=0):
 						if k not in ("name", "doctype", "creation", "owner",
 									 "modified", "modified_by", "docstatus")})
 			_set_sync_flags(doc)
-			doc.save(ignore_permissions=True)
+			doc.save(ignore_permissions=True, ignore_links=True)
 			frappe.db.commit()
 			return {"status": "updated", "name": name, "docstatus": 0}
 
@@ -80,7 +80,11 @@ def upsert_document(doctype, name, data, target_docstatus=0):
 	draft["docstatus"] = 0
 	doc = frappe.get_doc(draft)
 	_set_sync_flags(doc)
-	doc.insert(ignore_permissions=True)
+	doc.insert(
+		ignore_permissions=True,
+		ignore_links=True,
+		ignore_mandatory=True,
+	)
 	frappe.db.commit()  # ← permanent: Frappe's error-handler rollback cannot undo this
 
 	final_status = 0
