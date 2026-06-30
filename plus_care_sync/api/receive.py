@@ -84,6 +84,7 @@ def upsert_document(doctype, name, data, target_docstatus=0):
 		ignore_permissions=True,
 		ignore_links=True,
 		ignore_mandatory=True,
+		set_name=name,  # bypass autoname (e.g. "hash") so the original branch name is preserved
 	)
 	frappe.db.commit()  # ← permanent: Frappe's error-handler rollback cannot undo this
 
