@@ -549,7 +549,7 @@ class SyncEngine:
 			self.log_sync_error(doctype, None, str(e))
 			return 0
 
-	def _do_push(self, doc, payload):
+	def _do_push(self, doc, payload, target_docstatus=None):
 		"""Push a document to the remote via the plus_care_sync receiver endpoint.
 
 		The receiver (plus_care_sync.api.receive.upsert_document) inserts with
@@ -558,13 +558,19 @@ class SyncEngine:
 		(e.g. Purchase Invoice ⇄ Payment Entry) that the standard REST resource
 		API would reject with LinkValidationError.
 
+		target_docstatus overrides the docstatus from the payload.  Pass 0 to
+		force a draft-only push (no escalation on remote) when the caller just
+		needs the record to exist for _validate_links() purposes.
+
 		Returns the requests.Response so the caller can inspect the status code.
 		"""
+		if target_docstatus is None:
+			target_docstatus = int(payload.get("docstatus") or 0)
 		body = {
 			"doctype": doc.doctype,
 			"name": doc.name,
 			"data": json.dumps(payload, default=str),
-			"target_docstatus": int(payload.get("docstatus") or 0),
+			"target_docstatus": target_docstatus,
 		}
 		return requests.post(
 			f"{self.remote_url}/api/method/plus_care_sync.api.receive.upsert_document",
@@ -574,13 +580,15 @@ class SyncEngine:
 		)
 
 	def _push_serial_batch_bundles(self, doc):
-		"""Pre-push Serial and Batch Bundle documents referenced in items rows.
+		"""Pre-push Serial and Batch Bundle documents referenced in items rows AS DRAFT.
 
-		ignore_links=True bypasses link validation but NOT business logic inside
-		submit(): ERPNext physically calls frappe.get_doc("Serial and Batch Bundle",
-		name) during stock processing, so the bundle must exist on remote BEFORE
-		the parent document is submitted.  Serial and Batch Bundle has no back-
-		reference to its parent, so there is no circular dependency here.
+		The bundle must exist on remote BEFORE the parent document is submitted
+		because ERPNext physically loads it during stock processing (not just via
+		_validate_links).  We push with target_docstatus=0 (draft) so the receiver
+		only needs to INSERT and commit — no escalation attempt, no risk of the
+		insert being rolled back due to a failed submit.
+
+		The bundle will be escalated to Submitted in its own sync_doctype run.
 		"""
 		for item in (doc.get("items") or []):
 			bundle_name = item.get("serial_and_batch_bundle")
@@ -594,7 +602,14 @@ class SyncEngine:
 				continue
 			try:
 				bundle_doc = frappe.get_doc("Serial and Batch Bundle", bundle_name)
-				self._do_push(bundle_doc, bundle_doc.as_dict())
+				# Push as draft only: receiver inserts + commits, no escalation.
+				# A failed submit would roll back the insert; draft-only avoids that.
+				resp = self._do_push(bundle_doc, bundle_doc.as_dict(), target_docstatus=0)
+				if resp.status_code not in (200, 201):
+					self.log_sync_error(
+						"Serial and Batch Bundle", bundle_name,
+						f"draft pre-push failed ({resp.status_code}): {resp.text}",
+					)
 			except Exception as e:
 				self.log_sync_error(
 					"Serial and Batch Bundle", bundle_name,
