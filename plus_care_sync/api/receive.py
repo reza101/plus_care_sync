@@ -13,12 +13,13 @@ inserts with ``ignore_links=True`` instead: missing references are
 tolerated and arrive in subsequent syncs (eventual consistency — the
 Availability + Partition-Tolerance tradeoff this sync system is built on).
 
-Submittable documents are inserted as Draft then submitted, so ERPNext
-creates Stock Ledger Entries / GL Entries / Bin naturally — mirroring the
-pull-side _apply_submitted_doc logic.
-
-Both branch and central run this same app, so this method is guaranteed
-to exist on the receiving side.
+Submittable documents are inserted as Draft then submitted so ERPNext
+creates Stock Ledger Entries / GL Entries / Bin naturally.  If submit
+fails (e.g. a dependency needed at the business-logic level does not yet
+exist), the document is kept as Draft and a warning is logged.  The Draft
+record is sufficient for _validate_links() checks in other documents that
+reference it; the document will be escalated to Submitted on the next sync
+run once its own dependencies arrive.
 """
 import json
 
@@ -35,8 +36,9 @@ def upsert_document(doctype, name, data, target_docstatus=0):
 		data: Full document dict as JSON string (or dict).
 		target_docstatus: Desired final docstatus (0 draft, 1 submitted, 2 cancelled).
 
-	Returns a small status dict; raises on unrecoverable errors so the
-	pushing side records the failure and retries on the next sync.
+	Returns a status dict.  Never raises — insert failures are logged and
+	re-raised so the sender records the failure; submit/cancel failures are
+	logged but the draft is preserved so subsequent syncs can retry.
 	"""
 	if isinstance(data, str):
 		data = json.loads(data)
@@ -67,25 +69,25 @@ def upsert_document(doctype, name, data, target_docstatus=0):
 
 		# Escalate docstatus on an existing document (0→1, 0→2, or 1→2).
 		doc = frappe.get_doc(doctype, name)
-		_escalate(doc, current, target_docstatus)
-		frappe.db.commit()
-		return {"status": "escalated", "name": name, "docstatus": doc.docstatus}
+		final_status = _safe_escalate(doc, current, target_docstatus)
+		return {"status": "escalated", "name": name, "docstatus": final_status}
 
-	# New document: always insert as Draft first so validation runs cleanly,
-	# then transition to the target docstatus.
+	# New document: insert as Draft first (permanently committed), then try
+	# to escalate.  The Draft commit is intentionally separated from the
+	# escalation so that a failed submit does NOT roll back the insert —
+	# the record must exist for _validate_links() checks in other documents.
 	draft = dict(data)
 	draft["docstatus"] = 0
 	doc = frappe.get_doc(draft)
 	_set_sync_flags(doc)
 	doc.insert(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # ← permanent: Frappe's error-handler rollback cannot undo this
 
+	final_status = 0
 	if target_docstatus >= 1:
-		doc = frappe.get_doc(doctype, name)
-		_escalate(doc, 0, target_docstatus)
-		frappe.db.commit()
+		final_status = _safe_escalate(doc, 0, target_docstatus)
 
-	return {"status": "created", "name": name, "docstatus": doc.docstatus}
+	return {"status": "created", "name": name, "docstatus": final_status}
 
 
 def _set_sync_flags(doc):
@@ -96,6 +98,32 @@ def _set_sync_flags(doc):
 	doc.flags.ignore_mandatory = True
 	doc.flags.ignore_permissions = True
 	doc.flags.ignore_validate = True
+
+
+def _safe_escalate(doc, current, target):
+	"""Try to escalate docstatus; on failure roll back and keep the document
+	as a Draft so _validate_links() in other documents can still find it.
+
+	Returns the actual docstatus after the operation.
+	"""
+	try:
+		_escalate(doc, current, target)
+		frappe.db.commit()
+		return target
+	except Exception as e:
+		# Roll back only the failed escalation — the prior Draft commit is
+		# permanent and unaffected by this rollback.
+		try:
+			frappe.db.rollback()
+		except Exception:
+			pass
+		frappe.log_error(
+			f"Plus Care Sync — could not escalate {doc.doctype}/{doc.name} "
+			f"from {current} to {target}: {e}\n"
+			"Document kept as Draft; will retry on next sync.",
+			"Plus Care Sync",
+		)
+		return current  # stayed at current docstatus
 
 
 def _escalate(doc, current, target):
