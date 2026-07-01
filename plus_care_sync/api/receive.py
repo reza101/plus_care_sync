@@ -63,7 +63,7 @@ def upsert_document(doctype, name, data, target_docstatus=0):
 						if k not in ("name", "doctype", "creation", "owner",
 									 "modified", "modified_by", "docstatus")})
 			_set_sync_flags(doc)
-			doc.save(ignore_permissions=True, ignore_links=True)
+			doc.save(ignore_permissions=True)  # ignore_links via flags set by _set_sync_flags
 			frappe.db.commit()
 			return {"status": "updated", "name": name, "docstatus": 0}
 
